@@ -24,14 +24,11 @@ impl Ffmpeg {
             .ok()
             .filter(|path| path.exists());
 
-        let local_ffmpeg = PathBuf::from("../vendor/ffmpeg/bin/ffmpeg.exe");
-        let local_ffprobe = PathBuf::from("../vendor/ffmpeg/bin/ffprobe.exe");
-
         let ffmpeg_path = bundled_ffmpeg
-            .or_else(|| local_ffmpeg.exists().then_some(local_ffmpeg))
+            .or_else(|| first_existing(["vendor/ffmpeg/bin/ffmpeg.exe", "../vendor/ffmpeg/bin/ffmpeg.exe"]))
             .or_else(|| which::which("ffmpeg").ok());
         let ffprobe_path = bundled_ffprobe
-            .or_else(|| local_ffprobe.exists().then_some(local_ffprobe))
+            .or_else(|| first_existing(["vendor/ffmpeg/bin/ffprobe.exe", "../vendor/ffmpeg/bin/ffprobe.exe"]))
             .or_else(|| which::which("ffprobe").ok());
 
         Self {
@@ -154,6 +151,13 @@ impl Ffmpeg {
             )))
         }
     }
+}
+
+fn first_existing<const N: usize>(candidates: [&str; N]) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
 }
 
 fn display_path(path: &PathBuf) -> String {
