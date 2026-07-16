@@ -1,0 +1,14 @@
+target/
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/.tauri/
+.env
+.env.local
+*.log
+*.db
+*.db-shm
+*.db-wal
+vendor/ffmpeg/bin/*.exe
+!vendor/ffmpeg/bin/.gitkeep

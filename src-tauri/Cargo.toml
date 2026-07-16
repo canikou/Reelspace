@@ -1,0 +1,36 @@
+[package]
+name = "reelspace"
+version = "0.1.0"
+description = "A Windows capture manager for raw recordings and trimmed clips."
+authors = ["Reelspace"]
+edition = "2021"
+
+[lib]
+name = "reelspace_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "5"
+rayon = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+thiserror = "1"
+walkdir = "2"
+which = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Storage_FileSystem",
+  "Win32_Foundation"
+] }
