@@ -1,8 +1,8 @@
-import { Clapperboard, FolderOpen, Home, Library, Settings, Tags } from "lucide-react";
+import { Clapperboard, FolderOpen, Home, Library, Settings, Tags, type LucideIcon } from "lucide-react";
 
 export type PageKey = "home" | "gallery" | "clips" | "collections" | "settings";
 
-const items: Array<{ key: PageKey; label: string; icon: React.ComponentType<{ size?: number }> }> = [
+const items: Array<{ key: PageKey; label: string; icon: LucideIcon }> = [
   { key: "home", label: "Home", icon: Home },
   { key: "gallery", label: "Gallery", icon: FolderOpen },
   { key: "clips", label: "Clips", icon: Clapperboard },

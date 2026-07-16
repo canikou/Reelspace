@@ -30,7 +30,4 @@ walkdir = "2"
 which = "6"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-  "Win32_Storage_FileSystem",
-  "Win32_Foundation"
-] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }

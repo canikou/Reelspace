@@ -55,25 +55,28 @@ fn storage_anchor(settings: &AppSettings) -> Option<&Path> {
 
 #[cfg(windows)]
 fn drive_space(path: &Path) -> Option<(u64, u64)> {
+    use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    use windows::core::PCWSTR;
+    use std::path::Component;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-    let root = path.components().next().map(|component| component.as_os_str())?;
-    let mut wide = root.encode_wide().collect::<Vec<u16>>();
-    wide.push('\\' as u16);
+    let root = path.components().find_map(|component| match component {
+        Component::Prefix(prefix) => Some(format!("{}\\", prefix.as_os_str().to_string_lossy())),
+        _ => None,
+    })?;
+    let mut wide = OsStr::new(&root).encode_wide().collect::<Vec<u16>>();
     wide.push(0);
     let mut available = 0u64;
     let mut total = 0u64;
     let ok = unsafe {
         GetDiskFreeSpaceExW(
-            PCWSTR(wide.as_ptr()),
-            Some(&mut available),
-            Some(&mut total),
-            None,
+            wide.as_ptr(),
+            &mut available,
+            &mut total,
+            std::ptr::null_mut(),
         )
     };
-    ok.as_bool().then_some((total, available))
+    (ok != 0).then_some((total, available))
 }
 
 #[cfg(not(windows))]

@@ -15,11 +15,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(app: &AppHandle) -> AppResult<Self> {
-        let data_dir = app
-            .path()
-            .app_data_dir()
-            .or_else(|_| fallback_data_dir())
-            .map_err(|err| anyhow::anyhow!("could not resolve app data directory: {err}"))?;
+        let data_dir = match app.path().app_data_dir() {
+            Ok(path) => path,
+            Err(_) => fallback_data_dir()?,
+        };
         let thumbnail_dir = data_dir.join("thumbnails");
         fs::create_dir_all(&thumbnail_dir)?;
         let db = Database::open(data_dir.join("reelspace.db"))?;
