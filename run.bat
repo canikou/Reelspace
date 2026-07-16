@@ -2,6 +2,7 @@
 setlocal
 cd /d "%~dp0"
 set CI=true
+call scripts\use-msvc-env.bat
 
 where pnpm >nul 2>nul
 if errorlevel 1 (

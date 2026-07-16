@@ -17,11 +17,23 @@ It provides a responsive gallery, local tags and tag aliases, in-window playback
 run.bat
 ```
 
-## Build And Run
+## Test
+
+```bat
+test.bat
+```
+
+This runs TypeScript, the frontend production build, and `cargo check`.
+
+## Build And Run Debug
 
 ```bat
 build-run.bat
 ```
+
+This builds the frontend and debug Rust binary, then launches the app. It avoids release optimization and NSIS packaging.
+
+The first executable build can still take several minutes because Rust has to codegen and link the Tauri/WebView2 dependency graph. Use `test.bat` for the fast inner loop.
 
 ## Installer
 
@@ -30,3 +42,5 @@ dist-setup.bat
 ```
 
 The installer artifacts are copied to `dist`.
+
+This is the slow path. Use it only when you need an optimized distributable installer.

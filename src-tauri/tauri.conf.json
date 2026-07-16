@@ -28,7 +28,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": [],
+    "icon": ["icons/icon.ico"],
     "resources": {
       "../vendor/ffmpeg/bin/ffmpeg.exe": "vendor/ffmpeg/bin/ffmpeg.exe",
       "../vendor/ffmpeg/bin/ffprobe.exe": "vendor/ffmpeg/bin/ffprobe.exe"

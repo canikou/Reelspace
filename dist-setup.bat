@@ -2,6 +2,7 @@
 setlocal
 cd /d "%~dp0"
 set CI=true
+call scripts\use-msvc-env.bat
 
 where pnpm >nul 2>nul
 if errorlevel 1 (
@@ -31,7 +32,7 @@ if not exist "node_modules" (
   if errorlevel 1 exit /b 1
 )
 
-echo Building optimized installer...
+echo Building optimized installer. This is slower than build-run.bat because NSIS packages bundled assets.
 pnpm tauri build
 if errorlevel 1 exit /b 1
 
