@@ -1,0 +1,38 @@
+import { Maximize2, X } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { mediaSrc } from "../lib/api";
+import type { MediaItem } from "../lib/types";
+
+export function PlayerModal({ item, onClose }: { item: MediaItem; onClose: () => void }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const video = videoRef.current;
+      if (!video) return;
+      if (event.key === "ArrowLeft") video.currentTime = Math.max(0, video.currentTime - 5);
+      if (event.key === "ArrowRight") video.currentTime = Math.min(video.duration || item.durationSeconds, video.currentTime + 5);
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [item.durationSeconds, onClose]);
+
+  return (
+    <div className="modal-backdrop">
+      <section className="player-modal">
+        <header className="modal-header">
+          <div>
+            <h2>{item.filename}</h2>
+            <p>{item.tags.join(", ") || "Untagged"}</p>
+          </div>
+          <div className="modal-actions">
+            <button title="Fullscreen" onClick={() => videoRef.current?.requestFullscreen()}><Maximize2 size={18} /></button>
+            <button title="Close" onClick={onClose}><X size={18} /></button>
+          </div>
+        </header>
+        <video ref={videoRef} src={mediaSrc(item.path)} controls autoPlay className="video-player" />
+      </section>
+    </div>
+  );
+}
