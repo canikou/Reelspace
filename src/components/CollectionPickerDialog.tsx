@@ -1,5 +1,5 @@
 import { Library, Plus } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { Collection, MediaItem } from "../lib/types";
 import { Dialog } from "./Dialog";
 
@@ -18,8 +18,11 @@ export function CollectionPickerDialog({
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
 
   async function pick(collection: Collection) {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusyId(collection.id);
     setError(null);
     try {
@@ -27,11 +30,12 @@ export function CollectionPickerDialog({
     } catch (reason) {
       setError(String(reason));
       setBusyId(null);
+      inFlight.current = false;
     }
   }
 
   return (
-    <Dialog title="Add to collection" description={item.filename} onClose={onClose}>
+    <Dialog title="Add to collection" description={item.filename} onClose={busyId ? () => undefined : onClose}>
       <div className="collection-picker">
         {collections.map((collection) => (
           <button key={collection.id} onClick={() => pick(collection)} disabled={busyId !== null}>
@@ -40,7 +44,7 @@ export function CollectionPickerDialog({
             <small>{busyId === collection.id ? "…" : collection.itemCount}</small>
           </button>
         ))}
-        <button className="create-row" onClick={onCreate}>
+        <button className="create-row" onClick={onCreate} disabled={busyId !== null}>
           <Plus size={17} /> <span>New collection</span>
         </button>
         {error ? <div className="inline-error">{error}</div> : null}

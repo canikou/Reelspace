@@ -1,5 +1,5 @@
 import { Save } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Dialog } from "./Dialog";
 
 export function TextEditorDialog({
@@ -22,8 +22,11 @@ export function TextEditorDialog({
   const [value, setValue] = useState(initialValue);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
 
   async function save() {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -31,12 +34,13 @@ export function TextEditorDialog({
     } catch (reason) {
       setError(String(reason));
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
 
   return (
-    <Dialog title={title} description={description} onClose={onClose}>
+    <Dialog title={title} description={description} onClose={busy ? () => undefined : onClose}>
       <div className="dialog-body">
         {multiline ? (
           <textarea
@@ -58,7 +62,7 @@ export function TextEditorDialog({
         {error ? <div className="inline-error">{error}</div> : null}
       </div>
       <footer className="dialog-actions">
-        <button className="secondary-button" onClick={onClose}>Cancel</button>
+        <button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
         <button className="primary-button" onClick={save} disabled={busy}>
           <Save size={16} /> {busy ? "Saving" : "Save"}
         </button>

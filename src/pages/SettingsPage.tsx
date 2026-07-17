@@ -1,5 +1,5 @@
 import { FolderPlus, Save } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { pickFolder } from "../lib/dialog";
 import { formatBytes } from "../lib/format";
 import type { AppSettings, AppSnapshot } from "../lib/types";
@@ -20,6 +20,7 @@ export function SettingsPage({
   const [threshold, setThreshold] = useState(String(snapshot.settings.cleanupThresholdPercent));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const saveInFlight = useRef(false);
 
   useEffect(() => {
     setSourceFolders(snapshot.settings.sourceFolders.join("\n"));
@@ -30,6 +31,8 @@ export function SettingsPage({
   }, [snapshot]);
 
   async function save() {
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -43,6 +46,7 @@ export function SettingsPage({
     } catch (reason) {
       setError(String(reason));
     } finally {
+      saveInFlight.current = false;
       setBusy(false);
     }
   }

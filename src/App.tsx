@@ -7,7 +7,7 @@ import { SetupPrompt } from "./components/SetupPrompt";
 import { Sidebar, type PageKey } from "./components/Sidebar";
 import { TextEditorDialog } from "./components/TextEditorDialog";
 import { TrimModal } from "./components/TrimModal";
-import { api } from "./lib/api";
+import { api, normalizeAppError } from "./lib/api";
 import { pickFolder } from "./lib/dialog";
 import { formatBytes } from "./lib/format";
 import type { AppSnapshot, Collection, MediaItem } from "./lib/types";
@@ -40,18 +40,25 @@ export function App() {
   const [setupDismissed, setSetupDismissed] = useState(false);
   const scanInFlight = useRef(false);
   const lastScanAt = useRef(0);
+  const refreshGeneration = useRef(0);
+  const collectionRequestGeneration = useRef(0);
 
   const showError = useCallback((value: unknown) => {
-    setError(value instanceof Error ? value.message : String(value));
+    const normalized = normalizeAppError(value);
+    if (normalized.code !== "mediaProcessCancelled" && normalized.code !== "exportCancelled") {
+      setError(normalized.message);
+    }
   }, []);
 
   const refresh = useCallback(async () => {
+    const generation = ++refreshGeneration.current;
     const results = await Promise.allSettled([
       api.getAppState(),
       api.listMedia("raw"),
       api.listMedia("clip"),
       api.listCollections()
     ] as const);
+    if (generation !== refreshGeneration.current) return;
     const failures: string[] = [];
     if (results[0].status === "fulfilled") setSnapshot(results[0].value); else failures.push(String(results[0].reason));
     if (results[1].status === "fulfilled") setRawItems(results[1].value); else failures.push(String(results[1].reason));
@@ -146,9 +153,12 @@ export function App() {
   }
 
   async function openCollection(collection: Collection) {
+    const generation = ++collectionRequestGeneration.current;
     setError(null);
     try {
-      setCollectionItems(await api.listCollectionMedia(collection.id));
+      const items = await api.listCollectionMedia(collection.id);
+      if (generation !== collectionRequestGeneration.current) return;
+      setCollectionItems(items);
       setSelectedCollection(collection);
     } catch (err) {
       showError(err);
@@ -188,7 +198,7 @@ export function App() {
             actions={actions}
             onCreate={() => setCreatingCollection(true)}
             onSelect={openCollection}
-            onBack={() => { setSelectedCollection(null); setCollectionItems([]); }}
+            onBack={() => { collectionRequestGeneration.current += 1; setSelectedCollection(null); setCollectionItems([]); }}
           />
         ) : null}
         {page === "settings" && snapshot ? (
