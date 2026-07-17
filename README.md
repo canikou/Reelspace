@@ -17,7 +17,7 @@ It provides a responsive gallery, local tags and tag aliases, in-window playback
 build-run.bat
 ```
 
-This is the only user-facing runner. It prints native Vite, Cargo, and Tauri output directly in the terminal while writing the same live output to a timestamped file under `logs\runners`.
+This is the development runner. It prints native Vite, Cargo, and Tauri output directly in the terminal while writing the same live output to a timestamped file under `logs\runners`.
 
 By default it uses Tauri dev mode, which starts the frontend server and Rust desktop app together. Keep the runner open while testing: frontend edits hot-reload and Rust edits rebuild incrementally. Closing the runner window terminates its app, server, and compiler processes. The next startup also removes stale Reelspace processes and frees the dev-server port.
 
@@ -26,7 +26,14 @@ Useful modes:
 ```bat
 build-run.bat --check
 build-run.bat --build-only
-build-run.bat --dist
 ```
 
-`--check` runs fast validation without launching. `--build-only` compiles the debug executable without launching it. `--dist` runs the slower optimized installer build once and copies setup artifacts to `dist`. Add `--no-pause` to automation or agent checks so failures return immediately.
+`--check` runs fast validation without launching. `--build-only` compiles the debug executable without launching it. Add `--no-pause` to automation or agent checks so failures return immediately.
+
+## Build Setup
+
+```bat
+build-setup.bat
+```
+
+The setup builder uses the same live logging, dependency cache, toolchain detection, and process cleanup as the development runner. It verifies the bundled FFmpeg tools, performs one optimized Tauri/NSIS build, validates the generated Windows executable, and writes the final installer to `dist\setup.exe`. Release build artifacts are retained so later setup builds can reuse them.

@@ -26,7 +26,7 @@ function Test-ReelspaceProcess {
     $executable.IndexOf($Workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
 
   $knownCommand =
-    $command -match 'build-run\.bat' -or
+    $command -match 'build-(run|setup)\.bat' -or
     $command -match 'runner(-supervisor|-watchdog)?\.ps1' -or
     $command -match 'vite(\.cmd)?' -or
     $command -match 'tauri(\.cmd)?\s+dev' -or

@@ -46,7 +46,7 @@ function Test-ReelspaceProcess {
     $command.IndexOf($Workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
     $executable.IndexOf($Workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
   $knownCommand =
-    $command -match 'build-run\.bat' -or
+    $command -match 'build-(run|setup)\.bat' -or
     $command -match 'runner(-supervisor|-watchdog)?\.ps1' -or
     $command -match 'vite(\.cmd)?' -or
     $command -match 'tauri(\.cmd)?\s+dev' -or
@@ -140,7 +140,8 @@ function Convert-RunnerArguments {
       '^--check$' { $mode = "check"; continue }
       '^--no-launch$' { $mode = "check"; continue }
       '^--build-only$' { $mode = "build"; continue }
-      '^--dist$' { $mode = "dist"; continue }
+      '^--setup$' { $mode = "setup"; continue }
+      '^--dist$' { $mode = "setup"; continue }
       '^--no-pause$' { $noPause = $true; continue }
       default { throw "Unknown runner option: $argument" }
     }

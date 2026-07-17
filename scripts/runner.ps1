@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("run", "check", "build", "dist")]
+  [ValidateSet("run", "check", "build", "setup")]
   [string]$Mode = "run",
 
   [Parameter(Mandatory = $true)]
@@ -156,19 +156,63 @@ function Sync-FrontendDependencies {
   Set-Content -LiteralPath $fingerprintPath -Value $expected -Encoding ASCII
 }
 
+function Assert-PackagingResources {
+  $resources = @(
+    @{ Name = "FFmpeg"; Path = "vendor\ffmpeg\bin\ffmpeg.exe"; MinimumBytes = 1MB },
+    @{ Name = "FFprobe"; Path = "vendor\ffmpeg\bin\ffprobe.exe"; MinimumBytes = 1MB },
+    @{ Name = "application icon"; Path = "src-tauri\icons\icon.ico"; MinimumBytes = 1KB }
+  )
+
+  foreach ($resource in $resources) {
+    $resolved = Join-Path $Workspace $resource.Path
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+      throw "$($resource.Name) is missing: $resolved"
+    }
+    $file = Get-Item -LiteralPath $resolved
+    if ($file.Length -lt $resource.MinimumBytes) {
+      throw "$($resource.Name) appears incomplete: $resolved ($($file.Length) bytes)"
+    }
+    Write-Host ("{0}: {1:N1} MB" -f $resource.Name, ($file.Length / 1MB)) -ForegroundColor Green
+  }
+}
+
+function Assert-WindowsExecutable {
+  param([string]$Path)
+
+  $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+  if ($file.Length -lt 1MB) {
+    throw "Generated setup is unexpectedly small: $($file.Length) bytes."
+  }
+
+  $stream = [IO.File]::OpenRead($file.FullName)
+  try {
+    if ($stream.ReadByte() -ne 0x4D -or $stream.ReadByte() -ne 0x5A) {
+      throw "Generated setup does not have a valid Windows executable header."
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Copy-InstallerArtifacts {
   $installerDir = Join-Path $Workspace "src-tauri\target\release\bundle\nsis"
   $outputDir = Join-Path $Workspace "dist"
-  $installers = @(Get-ChildItem -LiteralPath $installerDir -Filter "*.exe" -File -ErrorAction SilentlyContinue)
+  $installers = @(Get-ChildItem -LiteralPath $installerDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTimeUtc -Descending)
   if ($installers.Count -eq 0) {
     throw "Tauri completed, but no NSIS setup executable was found in $installerDir."
   }
 
   New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
-  foreach ($installer in $installers) {
-    Copy-Item -LiteralPath $installer.FullName -Destination $outputDir -Force
-    Write-Host "Installer: $(Join-Path $outputDir $installer.Name)" -ForegroundColor Green
-  }
+  $setupPath = Join-Path $outputDir "setup.exe"
+  Copy-Item -LiteralPath $installers[0].FullName -Destination $setupPath -Force
+  Assert-WindowsExecutable -Path $setupPath
+
+  $setupFile = Get-Item -LiteralPath $setupPath
+  $setupHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setupPath).Hash
+  Write-Host "Setup:  $setupPath" -ForegroundColor Green
+  Write-Host ("Size:   {0:N1} MB" -f ($setupFile.Length / 1MB)) -ForegroundColor Green
+  Write-Host "SHA256: $setupHash" -ForegroundColor Green
 }
 
 try {
@@ -234,10 +278,12 @@ try {
       Write-Stage "Building the debug application"
       Invoke-RunnerCommand -FilePath $cargoCommand.Source -Arguments @("build", "--manifest-path", "src-tauri\Cargo.toml")
     }
-    "dist" {
+    "setup" {
+      Write-Stage "Checking bundled setup resources"
+      Assert-PackagingResources
       Write-Stage "Building the optimized app and NSIS installer"
       Write-Host "Release builds are intentionally slower; incremental artifacts are retained for the next build."
-      Invoke-RunnerCommand -FilePath $pnpmCommand.Source -Arguments @("exec", "tauri", "build")
+      Invoke-RunnerCommand -FilePath $pnpmCommand.Source -Arguments @("run", "tauri:build")
       Write-Stage "Collecting setup files in dist"
       Copy-InstallerArtifacts
     }
@@ -245,7 +291,7 @@ try {
       Write-Stage "Starting Vite, compiling changed Rust code, and launching Reelspace"
       Write-Host "Keep this window open while testing. Frontend edits reload automatically."
       Write-Host "Rust edits rebuild incrementally. Closing this window terminates the full process tree."
-      Invoke-RunnerCommand -FilePath $pnpmCommand.Source -Arguments @("exec", "tauri", "dev")
+      Invoke-RunnerCommand -FilePath $pnpmCommand.Source -Arguments @("run", "tauri:dev")
     }
   }
 
