@@ -10,11 +10,13 @@ type ViewMode = "grid" | "list";
 export function MediaLibrary({
   items,
   actions,
-  empty
+  empty,
+  highlightedId
 }: {
   items: MediaItem[];
   actions: MediaActions;
   empty: string;
+  highlightedId?: string | null;
 }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("latest");
@@ -66,7 +68,7 @@ export function MediaLibrary({
           <button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-label="List view" title="List view"><List size={17} /></button>
         </div>
       </div>
-      <MediaGrid items={visible} actions={actions} empty={query ? "No media matches this search." : empty} view={view} />
+      <MediaGrid items={visible} actions={actions} empty={query ? "No media matches this search." : empty} view={view} highlightedId={highlightedId} />
     </div>
   );
 }

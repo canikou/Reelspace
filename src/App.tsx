@@ -32,6 +32,7 @@ export function App() {
   const [creatingCollection, setCreatingCollection] = useState(false);
   const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null);
   const [collectionItems, setCollectionItems] = useState<MediaItem[]>([]);
+  const [highlightedClipId, setHighlightedClipId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<MediaItem | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +67,7 @@ export function App() {
   const actions = useMemo(
     () => ({
       view: setPlaying,
-      trim: setTrimming,
+      trim: (item: MediaItem) => { setPlaying(null); setTrimming(item); },
       reveal: (item: MediaItem) => api.revealInExplorer(item.path).catch(showError),
       notes: (item: MediaItem) => setEditing({ kind: "notes", item }),
       tags: (item: MediaItem) => setEditing({ kind: "tags", item }),
@@ -120,6 +121,12 @@ export function App() {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
+  useEffect(() => {
+    if (!highlightedClipId) return;
+    const timeout = window.setTimeout(() => setHighlightedClipId(null), 5000);
+    return () => window.clearTimeout(timeout);
+  }, [highlightedClipId]);
+
   async function chooseInitialSourceFolder() {
     setBusy(true);
     setError(null);
@@ -172,7 +179,7 @@ export function App() {
         ) : null}
         {page === "home" && snapshot ? <HomePage snapshot={snapshot} rawItems={rawItems} clipItems={clipItems} actions={actions} onCleanup={setPendingDelete} /> : null}
         {page === "gallery" ? <GalleryPage items={rawItems} actions={actions} /> : null}
-        {page === "clips" ? <ClipsPage items={clipItems} actions={actions} /> : null}
+        {page === "clips" ? <ClipsPage items={clipItems} actions={actions} highlightedId={highlightedClipId} /> : null}
         {page === "collections" ? (
           <CollectionsPage
             collections={collections}
@@ -194,8 +201,16 @@ export function App() {
         ) : null}
       </main>
 
-      {playing ? <PlayerModal item={playing} onClose={() => setPlaying(null)} /> : null}
-      {trimming ? <TrimModal item={trimming} onClose={() => setTrimming(null)} onCreated={async () => { setTrimming(null); await refresh(); setPage("clips"); setNotice("Clip created"); }} /> : null}
+      {playing ? <PlayerModal item={playing} actions={actions} onClose={() => setPlaying(null)} /> : null}
+      {trimming ? <TrimModal item={trimming} onClose={() => setTrimming(null)} onCreated={async (created) => {
+        setTrimming(null);
+        setClipItems((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+        setHighlightedClipId(created.id);
+        setPage("clips");
+        setPlaying(created);
+        await refresh();
+        setNotice("Clip created");
+      }} /> : null}
       {editing ? (
         <TextEditorDialog
           title={editing.kind === "tags" ? "Edit tags" : "Edit notes"}

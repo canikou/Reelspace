@@ -62,5 +62,14 @@ export interface CreateClipRequest {
   startSeconds: number;
   endSeconds: number;
   title?: string | null;
-  accurate: boolean;
+  enabledAudioTrackIndices: number[];
+}
+
+export interface AudioTrack {
+  index: number;
+  codec?: string | null;
+  channels?: number | null;
+  language?: string | null;
+  title?: string | null;
+  isDefault: boolean;
 }

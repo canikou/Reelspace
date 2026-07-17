@@ -1,4 +1,5 @@
 import { Eye, FolderSearch, MoreVertical, NotebookPen, Scissors, Tags, Library } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { mediaSrc } from "../lib/api";
 import { formatBytes, formatDuration, formatShortDate } from "../lib/format";
 import type { MediaItem } from "../lib/types";
@@ -15,12 +16,15 @@ export interface MediaActions {
 export function MediaCard({
   item,
   actions,
-  view = "grid"
+  view = "grid",
+  highlighted = false
 }: {
   item: MediaItem;
   actions: MediaActions;
   view?: "grid" | "list";
+  highlighted?: boolean;
 }) {
+  const cardRef = useRef<HTMLElement | null>(null);
   const thumbnailSrc = mediaSrc(item.thumbnailPath);
   const detail = [
     item.width && item.height ? `${item.width}×${item.height}` : null,
@@ -29,8 +33,12 @@ export function MediaCard({
     formatShortDate(item.modifiedAt)
   ].filter(Boolean).join(" · ");
 
+  useEffect(() => {
+    if (highlighted) cardRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [highlighted]);
+
   return (
-    <article className={`media-card ${view}`}>
+    <article ref={cardRef} className={`media-card ${view}${highlighted ? " highlighted" : ""}`}>
       <button className="preview-button" onClick={() => actions.view(item)} title="Play" aria-label={`Play ${item.filename}`}>
         {thumbnailSrc ? (
           <img src={thumbnailSrc} alt="" loading="lazy" decoding="async" />

@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   AppSnapshot,
+  AudioTrack,
   Collection,
   CreateClipRequest,
   MediaItem,
@@ -17,7 +18,11 @@ export const api = {
   getAppState: () => invoke<AppSnapshot>("get_app_state"),
   saveSettings: (settings: AppSettings) => invoke<AppSnapshot>("save_settings", { settings }),
   scanSources: () => invoke<MediaItem[]>("scan_sources"),
+  repairThumbnails: () => invoke<MediaItem[]>("repair_thumbnails"),
   listMedia: (kind?: MediaKind) => invoke<MediaItem[]>("list_media", { kind }),
+  getMediaAudioTracks: (id: string) => invoke<AudioTrack[]>("get_media_audio_tracks", { id }),
+  getAudioTrackPreview: (id: string, streamIndex: number) =>
+    invoke<string>("get_audio_track_preview", { id, streamIndex }),
   updateMediaTags: (id: string, tags: string[]) =>
     invoke<MediaItem>("update_media_tags", { id, tags }),
   updateMediaNotes: (id: string, notes?: string | null) =>
