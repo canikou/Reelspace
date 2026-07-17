@@ -17,8 +17,9 @@ It provides a responsive gallery, local tags and tag aliases, in-window playback
 build-run.bat
 ```
 
-The runner prints each phase to the terminal and writes a live log to `logs\runners`.
-By default it uses Tauri dev mode, which starts the Vite frontend server and the Rust desktop app together.
+This is the only user-facing runner. It prints native Vite, Cargo, and Tauri output directly in the terminal while writing the same live output to a timestamped file under `logs\runners`.
+
+By default it uses Tauri dev mode, which starts the frontend server and Rust desktop app together. Keep the runner open while testing: frontend edits hot-reload and Rust edits rebuild incrementally. Closing the runner window terminates its app, server, and compiler processes. The next startup also removes stale Reelspace processes and frees the dev-server port.
 
 Useful modes:
 
@@ -28,4 +29,4 @@ build-run.bat --build-only
 build-run.bat --dist
 ```
 
-`--check` runs the fast validation path without launching. `--build-only` compiles the debug executable without launching it. `--dist` runs the slower optimized installer build and copies setup artifacts to `dist`.
+`--check` runs fast validation without launching. `--build-only` compiles the debug executable without launching it. `--dist` runs the slower optimized installer build once and copies setup artifacts to `dist`. Add `--no-pause` to automation or agent checks so failures return immediately.

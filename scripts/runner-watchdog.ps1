@@ -27,11 +27,10 @@ function Test-ReelspaceProcess {
 
   $knownCommand =
     $command -match 'build-run\.bat' -or
-    $command -match 'runner-supervisor\.ps1' -or
-    $command -match 'pnpm(\.cmd)?\s+dev' -or
-    $command -match 'vite(\.cmd)?\s+--host\s+127\.0\.0\.1' -or
-    $command -match 'tauri(\.cmd)?\s+"?dev"?' -or
-    $command -match 'cargo(\.exe)?\s+run' -or
+    $command -match 'runner(-supervisor|-watchdog)?\.ps1' -or
+    $command -match 'vite(\.cmd)?' -or
+    $command -match 'tauri(\.cmd)?\s+dev' -or
+    $command -match 'cargo(\.exe)?\s+(run|build)' -or
     $command -match 'target\\debug\\reelspace\.exe' -or
     $command -match 'src-tauri\\target\\debug\\reelspace\.exe' -or
     $executable -match 'src-tauri\\target\\debug\\reelspace\.exe'
@@ -57,6 +56,19 @@ try {
     }
 } catch {
   Write-WatchdogLine ("process purge skipped: {0}" -f $_.Exception.Message)
+}
+
+try {
+  Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction SilentlyContinue |
+    ForEach-Object {
+      $owner = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+      if ($owner -and $owner.ProcessName -in @("node", "reelspace")) {
+        Write-WatchdogLine ("stopping port 1420 listener PID {0} {1}" -f $owner.Id, $owner.ProcessName)
+        & taskkill.exe /PID $owner.Id /T /F 2>$null | Out-Null
+      }
+    }
+} catch {
+  Write-WatchdogLine ("port cleanup failed: {0}" -f $_.Exception.Message)
 }
 
 Write-WatchdogLine "done"
