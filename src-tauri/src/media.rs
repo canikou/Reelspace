@@ -1,3 +1,4 @@
+use crate::db::Database;
 use crate::error::{app_error, user_error, AppResult, ErrorCode};
 use crate::ffmpeg::{Ffmpeg, TrimMethod};
 use crate::models::{CreateClipRequest, MediaItem, MediaKind};
@@ -12,8 +13,18 @@ use walkdir::WalkDir;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "avi", "webm", "m4v"];
 
+pub struct ScanFolderResult {
+    pub items: Vec<MediaItem>,
+    pub files_visited: usize,
+    pub files_changed: usize,
+    pub cached_probe_hits: usize,
+    pub files_reprobed: usize,
+    pub files_skipped: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFingerprint {
+    pub path_key: String,
     pub size: u64,
     pub modified_ns: u128,
 }
@@ -40,23 +51,27 @@ impl FileFingerprint {
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
         Ok(Self {
+            path_key: normalized_path_key(
+                &path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+            ),
             size: metadata.len(),
             modified_ns,
         })
     }
 
     pub fn token(&self) -> String {
-        format!("{}:{}", self.size, self.modified_ns)
+        format!("{}:{}:{}", self.path_key, self.size, self.modified_ns)
     }
 }
 
 pub fn scan_folder(
     folder: &Path,
     ffmpeg: &Ffmpeg,
+    database: &Database,
     thumbnail_dir: &Path,
     existing: &HashMap<String, MediaItem>,
     excluded_roots: &[PathBuf],
-) -> AppResult<Vec<MediaItem>> {
+) -> AppResult<ScanFolderResult> {
     if !folder.exists() {
         return Err(app_error(
             ErrorCode::SourceUnavailable,
@@ -75,19 +90,38 @@ pub fn scan_folder(
         .filter(|path| is_video_file(path))
         .collect::<Vec<_>>();
 
-    let items = files
-        .iter()
-        .filter_map(|path| {
-            let key = normalized_path_key(path);
-            if let Some(item) = existing.get(&key) {
-                if file_is_unchanged(path, item) {
-                    return Some(item.clone());
-                }
+    let files_visited = files.len();
+    let mut result = ScanFolderResult {
+        items: Vec::with_capacity(files.len()),
+        files_visited,
+        files_changed: 0,
+        cached_probe_hits: 0,
+        files_reprobed: 0,
+        files_skipped: 0,
+    };
+    for path in files {
+        let key = normalized_path_key(&path);
+        if let Some(item) = existing.get(&key) {
+            if file_is_unchanged(&path, item) {
+                result.cached_probe_hits += 1;
+                result.items.push(item.clone());
+                continue;
             }
-            build_raw_item(path, ffmpeg, thumbnail_dir).ok()
-        })
-        .collect();
-    Ok(items)
+        }
+        match build_raw_item(&path, ffmpeg, database, thumbnail_dir) {
+            Ok((item, cache_hit)) => {
+                result.files_changed += 1;
+                if cache_hit {
+                    result.cached_probe_hits += 1;
+                } else {
+                    result.files_reprobed += 1;
+                }
+                result.items.push(item);
+            }
+            Err(_) => result.files_skipped += 1,
+        }
+    }
+    Ok(result)
 }
 
 pub fn build_clip_item(
@@ -233,13 +267,58 @@ pub fn clip_output_path(
     unique_path(base)
 }
 
-fn build_raw_item(path: &Path, ffmpeg: &Ffmpeg, thumbnail_dir: &Path) -> AppResult<MediaItem> {
+fn build_raw_item(
+    path: &Path,
+    ffmpeg: &Ffmpeg,
+    database: &Database,
+    thumbnail_dir: &Path,
+) -> AppResult<(MediaItem, bool)> {
     // This function is only reached for new or changed sources. A stable path
     // ID must not make a replacement file reuse the previous frame forever.
     let _ = std::fs::remove_file(thumbnail_dir.join(format!("{}.jpg", stable_id(path))));
-    let mut item = build_item_base(path, MediaKind::Raw, ffmpeg, thumbnail_dir)?;
+    let fingerprint = FileFingerprint::read(path)?;
+    let (probed, cache_hit) = match database.get_probe_cache(&fingerprint)? {
+        Some(probed) => (probed, true),
+        None => {
+            let probed = ffmpeg.probe_data(path)?;
+            database.put_probe_cache(&fingerprint, &probed)?;
+            (probed, false)
+        }
+    };
+    let metadata = std::fs::metadata(path)?;
+    let modified_at = timestamp_seconds(metadata.modified().ok());
+    let created_at = metadata
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(modified_at);
+    let id = stable_id(path);
+    let mut item = MediaItem {
+        id,
+        kind: MediaKind::Raw,
+        path: path.to_string_lossy().to_string(),
+        source_path: None,
+        filename: path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("video")
+            .to_string(),
+        file_size: metadata.len(),
+        duration_seconds: probed.metadata.duration_seconds,
+        width: probed.metadata.width,
+        height: probed.metadata.height,
+        codec: probed.metadata.codec,
+        tags: Vec::new(),
+        notes: None,
+        thumbnail_path: None,
+        created_at,
+        modified_at,
+        trim_start_seconds: None,
+        trim_end_seconds: None,
+    };
     item.tags = vec![infer_shadowplay_tag(path)];
-    Ok(item)
+    Ok((item, cache_hit))
 }
 
 fn build_item_base(
@@ -262,7 +341,7 @@ fn build_item_base(
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(modified_at);
     let id = stable_id(path);
-    let probed = ffmpeg.probe(path).unwrap_or_default();
+    let probed = ffmpeg.probe(path)?;
     let thumbnail =
         ensure_thumbnail(&id, path, probed.duration_seconds, ffmpeg, thumbnail_dir).unwrap_or(None);
 
@@ -328,6 +407,12 @@ fn file_is_unchanged(path: &Path, item: &MediaItem) -> bool {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default();
     metadata.len() == item.file_size && modified_at == item.modified_at
+}
+
+fn timestamp_seconds(time: Option<std::time::SystemTime>) -> i64 {
+    time.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_else(|| Utc::now().timestamp())
 }
 
 fn unique_path(base: PathBuf) -> PathBuf {

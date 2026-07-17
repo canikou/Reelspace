@@ -68,13 +68,17 @@ pub struct MediaItem {
     pub trim_end_seconds: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaMetadata {
     pub duration_seconds: f64,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub codec: Option<String>,
+    pub container: Option<String>,
+    pub frame_rate: Option<f64>,
+    pub rotation_degrees: Option<i32>,
+    pub creation_timestamp: Option<String>,
 }
 
 impl Default for MediaMetadata {
@@ -84,8 +88,19 @@ impl Default for MediaMetadata {
             width: None,
             height: None,
             codec: None,
+            container: None,
+            frame_rate: None,
+            rotation_degrees: None,
+            creation_timestamp: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeData {
+    pub metadata: MediaMetadata,
+    pub audio_tracks: Vec<AudioTrack>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

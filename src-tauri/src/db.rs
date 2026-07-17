@@ -1,6 +1,8 @@
-use crate::error::{user_error, AppResult};
-use crate::models::{AppSettings, Collection, MediaItem, MediaKind};
-use rusqlite::{params, Connection, OptionalExtension};
+use crate::error::{app_error, user_error, AppResult, ErrorCode};
+use crate::media::FileFingerprint;
+use crate::models::{AppSettings, Collection, MediaItem, MediaKind, ProbeData};
+use chrono::Utc;
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -8,17 +10,31 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
+const DATABASE_SCHEMA_VERSION: i64 = 2;
+pub const PROBE_SCHEMA_VERSION: i64 = 1;
+
 impl Database {
     pub fn open(path: PathBuf) -> AppResult<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
-        let db = Self {
+        let mut conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        Self::migrate(&mut conn)?;
+        let integrity: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(app_error(
+                ErrorCode::DatabaseIntegrityFailed,
+                "The local media library failed an integrity check",
+            )
+            .with_detail(integrity));
+        }
+        Ok(Self {
             conn: Mutex::new(conn),
-        };
-        db.migrate()?;
-        Ok(db)
+        })
     }
 
     fn conn(&self) -> AppResult<std::sync::MutexGuard<'_, Connection>> {
@@ -27,13 +43,34 @@ impl Database {
             .map_err(|_| user_error("database connection was poisoned"))
     }
 
-    fn migrate(&self) -> AppResult<()> {
-        let conn = self.conn()?;
-        conn.execute_batch(
-            r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-
+    fn migrate(conn: &mut Connection) -> AppResult<()> {
+        let current_version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|error| {
+                app_error(
+                    ErrorCode::DatabaseMigrationFailed,
+                    "The media library version could not be read",
+                )
+                .with_detail(error.to_string())
+            })?;
+        if current_version > DATABASE_SCHEMA_VERSION {
+            return Err(app_error(
+                ErrorCode::DatabaseMigrationFailed,
+                "This media library was created by a newer Reelspace version",
+            ));
+        }
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| {
+                app_error(
+                    ErrorCode::DatabaseMigrationFailed,
+                    "The media library migration could not start",
+                )
+                .with_detail(error.to_string())
+            })?;
+        transaction
+            .execute_batch(
+                r#"
             CREATE TABLE IF NOT EXISTS settings (
               key TEXT PRIMARY KEY NOT NULL,
               value TEXT NOT NULL
@@ -74,9 +111,115 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_media_kind_modified ON media(kind, modified_at DESC);
             CREATE INDEX IF NOT EXISTS idx_media_source_path ON media(source_path);
+
+            CREATE TABLE IF NOT EXISTS probe_cache (
+              path_key TEXT PRIMARY KEY NOT NULL,
+              file_size INTEGER NOT NULL,
+              modified_ns TEXT NOT NULL,
+              probe_version INTEGER NOT NULL,
+              probe_json TEXT NOT NULL,
+              probed_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_probe_cache_fingerprint
+              ON probe_cache(path_key, file_size, modified_ns, probe_version);
             "#,
+            )
+            .map_err(|error| {
+                app_error(
+                    ErrorCode::DatabaseMigrationFailed,
+                    "The media library schema could not be migrated",
+                )
+                .with_detail(error.to_string())
+            })?;
+        transaction
+            .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+            .map_err(|error| {
+                app_error(
+                    ErrorCode::DatabaseMigrationFailed,
+                    "The media library version could not be updated",
+                )
+                .with_detail(error.to_string())
+            })?;
+        transaction.commit().map_err(|error| {
+            app_error(
+                ErrorCode::DatabaseMigrationFailed,
+                "The media library migration could not be committed",
+            )
+            .with_detail(error.to_string())
+        })?;
+        Ok(())
+    }
+
+    pub fn get_probe_cache(&self, fingerprint: &FileFingerprint) -> AppResult<Option<ProbeData>> {
+        let conn = self.conn()?;
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT probe_json FROM probe_cache
+                 WHERE path_key = ?1 AND file_size = ?2 AND modified_ns = ?3 AND probe_version = ?4",
+                params![
+                    fingerprint.path_key,
+                    fingerprint.size as i64,
+                    fingerprint.modified_ns.to_string(),
+                    PROBE_SCHEMA_VERSION,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(json) = json else {
+            return Ok(None);
+        };
+        match serde_json::from_str::<ProbeData>(&json) {
+            Ok(data) if probe_data_is_valid(&data) => Ok(Some(data)),
+            _ => {
+                conn.execute(
+                    "DELETE FROM probe_cache WHERE path_key = ?1",
+                    [&fingerprint.path_key],
+                )?;
+                Ok(None)
+            }
+        }
+    }
+
+    pub fn put_probe_cache(
+        &self,
+        fingerprint: &FileFingerprint,
+        data: &ProbeData,
+    ) -> AppResult<()> {
+        if !probe_data_is_valid(data) {
+            return Err(app_error(
+                ErrorCode::CorruptMedia,
+                "Invalid media metadata was not cached",
+            ));
+        }
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO probe_cache (
+               path_key, file_size, modified_ns, probe_version, probe_json, probed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(path_key) DO UPDATE SET
+               file_size = excluded.file_size,
+               modified_ns = excluded.modified_ns,
+               probe_version = excluded.probe_version,
+               probe_json = excluded.probe_json,
+               probed_at = excluded.probed_at",
+            params![
+                fingerprint.path_key,
+                fingerprint.size as i64,
+                fingerprint.modified_ns.to_string(),
+                PROBE_SCHEMA_VERSION,
+                serde_json::to_string(data)?,
+                Utc::now().timestamp(),
+            ],
         )?;
         Ok(())
+    }
+
+    pub fn probe_cache_count(&self) -> AppResult<u64> {
+        let conn = self.conn()?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM probe_cache", [], |row| row.get(0))?;
+        Ok(count.max(0) as u64)
     }
 
     pub fn load_settings(&self) -> AppResult<AppSettings> {
@@ -281,6 +424,18 @@ impl Database {
     }
 }
 
+fn probe_data_is_valid(data: &ProbeData) -> bool {
+    let metadata = &data.metadata;
+    metadata.duration_seconds.is_finite()
+        && metadata.duration_seconds >= 0.0
+        && metadata
+            .frame_rate
+            .is_none_or(|value| value.is_finite() && value > 0.0)
+        && metadata.width.is_none_or(|value| value > 0)
+        && metadata.height.is_none_or(|value| value > 0)
+        && data.audio_tracks.len() <= 128
+}
+
 fn row_to_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
     let tags_json: String = row.get("tags_json")?;
     Ok(MediaItem {
@@ -307,6 +462,7 @@ fn row_to_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AudioTrack, MediaMetadata};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn item(path: &str, kind: MediaKind) -> MediaItem {
@@ -328,6 +484,29 @@ mod tests {
             modified_at: 2,
             trim_start_seconds: (kind == MediaKind::Clip).then_some(1.0),
             trim_end_seconds: (kind == MediaKind::Clip).then_some(5.0),
+        }
+    }
+
+    fn probe_data(duration_seconds: f64) -> ProbeData {
+        ProbeData {
+            metadata: MediaMetadata {
+                duration_seconds,
+                width: Some(1920),
+                height: Some(1080),
+                codec: Some("h264".to_string()),
+                container: Some("mov,mp4".to_string()),
+                frame_rate: Some(60.0),
+                rotation_degrees: None,
+                creation_timestamp: None,
+            },
+            audio_tracks: vec![AudioTrack {
+                index: 1,
+                codec: Some("aac".to_string()),
+                channels: Some(2),
+                language: Some("eng".to_string()),
+                title: None,
+                is_default: true,
+            }],
         }
     }
 
@@ -355,6 +534,72 @@ mod tests {
         assert_eq!(stored.trim_start_seconds, Some(1.0));
 
         drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn probe_cache_requires_an_exact_fingerprint() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-probe-cache-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        let fingerprint = FileFingerprint {
+            path_key: "c:\\captures\\game.mp4".to_string(),
+            size: 42,
+            modified_ns: 123,
+        };
+        db.put_probe_cache(&fingerprint, &probe_data(10.0))
+            .expect("cache metadata");
+        assert_eq!(
+            db.get_probe_cache(&fingerprint)
+                .expect("cache lookup")
+                .expect("cache hit")
+                .metadata
+                .duration_seconds,
+            10.0
+        );
+        let changed = FileFingerprint {
+            size: 43,
+            ..fingerprint
+        };
+        assert!(db
+            .get_probe_cache(&changed)
+            .expect("changed lookup")
+            .is_none());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn migrations_preserve_media_organization_data() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-migration-{nonce}.sqlite"));
+        {
+            let db = Database::open(path.clone()).expect("database");
+            let media = item("C:\\captures\\kept.mp4", MediaKind::Raw);
+            db.upsert_media(&media).expect("insert media");
+            db.create_collection(&"b".repeat(64), "Favorites", 1)
+                .expect("collection");
+            db.add_to_collection(&"b".repeat(64), &media.id, 2)
+                .expect("collection item");
+        }
+        let conn = Connection::open(&path).expect("legacy connection");
+        conn.pragma_update(None, "user_version", 1)
+            .expect("legacy version");
+        drop(conn);
+
+        let reopened = Database::open(path.clone()).expect("migrated database");
+        assert_eq!(reopened.list_media(None).expect("media").len(), 1);
+        assert_eq!(
+            reopened.list_collections().expect("collections")[0].item_count,
+            1
+        );
+        drop(reopened);
         let _ = std::fs::remove_file(path);
     }
 }

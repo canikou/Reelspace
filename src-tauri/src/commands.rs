@@ -147,14 +147,47 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
         .collect::<HashMap<_, _>>();
     let excluded_roots = output_roots(&settings);
     let mut scanned = Vec::new();
+    let mut reachable_sources = Vec::new();
+    let mut files_visited = 0;
+    let mut files_changed = 0;
+    let mut files_reprobed = 0;
+    let mut cached_probe_hits = 0;
+    let mut files_skipped = 0;
+    let mut files_missing = 0;
     for folder in &settings.source_folders {
-        scanned.extend(media::scan_folder(
+        let source_id = stable_id(folder);
+        match media::scan_folder(
             Path::new(folder),
             &state.ffmpeg,
+            &state.db,
             &state.thumbnail_dir,
             &existing,
             &excluded_roots,
-        )?);
+        ) {
+            Ok(result) => {
+                reachable_sources.push(PathBuf::from(folder));
+                files_visited += result.files_visited;
+                files_changed += result.files_changed;
+                files_reprobed += result.files_reprobed;
+                cached_probe_hits += result.cached_probe_hits;
+                files_skipped += result.files_skipped;
+                scanned.extend(result.items);
+            }
+            Err(error) if error.code == ErrorCode::SourceUnavailable => {
+                state.telemetry.event(
+                    "warn",
+                    "library.source.unavailable",
+                    json!({ "sourceId": source_id, "code": error.code }),
+                );
+            }
+            Err(error) => {
+                state.telemetry.event(
+                    "error",
+                    "library.source.failed",
+                    json!({ "sourceId": source_id, "code": error.code }),
+                );
+            }
+        }
     }
     let scanned_count = scanned.len();
     for item in &scanned {
@@ -171,11 +204,12 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
     }
     for item in existing_items {
         let path = Path::new(&item.path);
-        if belongs_to_sources(path, &settings.source_folders)
+        if belongs_to_roots(path, &reachable_sources)
             && !belongs_to_roots(path, &excluded_roots)
-            && !path.exists()
+            && matches!(path.try_exists(), Ok(false))
         {
             state.db.delete_media(&item.id)?;
+            files_missing += 1;
         }
     }
     // Backfill thumbnails for unchanged records too. Older versions could
@@ -193,6 +227,15 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
         "library.scan.finished",
         json!({
             "indexedFiles": scanned_count,
+            "sourcesConfigured": settings.source_folders.len(),
+            "sourcesReached": reachable_sources.len(),
+            "filesVisited": files_visited,
+            "filesChanged": files_changed,
+            "filesMissing": files_missing,
+            "filesReprobed": files_reprobed,
+            "cachedProbeHits": cached_probe_hits,
+            "filesSkipped": files_skipped,
+            "probeCacheEntries": state.db.probe_cache_count()?,
             "repairedThumbnails": repaired,
             "thumbnailFailures": failures.len(),
             "elapsedMs": started.elapsed().as_millis() as u64,
@@ -218,10 +261,19 @@ pub async fn get_media_audio_tracks(
     validate_id(&id, "media")?;
     validate_session_id(&session_id)?;
     let item = state.db.get_media(&id)?;
+    let path = PathBuf::from(&item.path);
+    let fingerprint = media::FileFingerprint::read(&path)?;
+    if let Some(cached) = state.db.get_probe_cache(&fingerprint)? {
+        state.telemetry.event(
+            "info",
+            "media.probe.cache_hit",
+            json!({ "mediaId": id, "operation": "audio_tracks" }),
+        );
+        return Ok(cached.audio_tracks);
+    }
     let runtime = state.inner().clone();
     let job_runtime = runtime.clone();
     let cancellation = runtime.preview_coordinator.session(&session_id);
-    let path = PathBuf::from(item.path);
     run_media_job(
         &runtime,
         "audio_probe",
@@ -236,9 +288,11 @@ pub async fn get_media_audio_tracks(
             if cancellation.load(Ordering::Acquire) {
                 return Err(AppError::cancelled("Audio probe"));
             }
-            job_runtime
+            let probed = job_runtime
                 .ffmpeg
-                .audio_tracks_cancellable(&path, &cancellation)
+                .probe_data_cancellable(&path, &cancellation)?;
+            job_runtime.db.put_probe_cache(&fingerprint, &probed)?;
+            Ok(probed.audio_tracks)
         },
     )
     .await
@@ -728,12 +782,6 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
     let path_key = media::normalized_path_key(path);
     let root_key = media::normalized_path_key(root);
     path_key == root_key || path_key.starts_with(&format!("{root_key}\\"))
-}
-
-fn belongs_to_sources(path: &Path, sources: &[String]) -> bool {
-    sources
-        .iter()
-        .any(|source| path_is_within(path, Path::new(source)))
 }
 
 fn belongs_to_roots(path: &Path, roots: &[PathBuf]) -> bool {

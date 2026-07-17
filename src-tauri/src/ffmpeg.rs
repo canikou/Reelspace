@@ -1,5 +1,5 @@
 use crate::error::{app_error, user_error, AppError, AppResult, ErrorCode};
-use crate::models::{AudioTrack, MediaMetadata, ToolHealth};
+use crate::models::{AudioTrack, MediaMetadata, ProbeData, ToolHealth};
 use serde::Deserialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -116,19 +116,25 @@ impl Ffmpeg {
     }
 
     pub fn probe(&self, path: &Path) -> AppResult<MediaMetadata> {
-        Ok(self.probe_response(path, None)?.into_metadata())
+        Ok(self.probe_data(path)?.metadata)
+    }
+
+    pub fn probe_data(&self, path: &Path) -> AppResult<ProbeData> {
+        Ok(self.probe_response(path, None)?.into_probe_data())
+    }
+
+    pub fn probe_data_cancellable(
+        &self,
+        path: &Path,
+        cancelled: &AtomicBool,
+    ) -> AppResult<ProbeData> {
+        Ok(self
+            .probe_response(path, Some(cancelled))?
+            .into_probe_data())
     }
 
     pub fn audio_tracks(&self, path: &Path) -> AppResult<Vec<AudioTrack>> {
         Ok(self.probe_response(path, None)?.audio_tracks())
-    }
-
-    pub fn audio_tracks_cancellable(
-        &self,
-        path: &Path,
-        cancelled: &AtomicBool,
-    ) -> AppResult<Vec<AudioTrack>> {
-        Ok(self.probe_response(path, Some(cancelled))?.audio_tracks())
     }
 
     fn probe_response(
@@ -581,6 +587,15 @@ struct ProbeResponse {
 }
 
 impl ProbeResponse {
+    fn into_probe_data(self) -> ProbeData {
+        let audio_tracks = self.audio_tracks();
+        let metadata = self.into_metadata();
+        ProbeData {
+            metadata,
+            audio_tracks,
+        }
+    }
+
     fn audio_tracks(&self) -> Vec<AudioTrack> {
         self.streams
             .iter()
@@ -612,9 +627,10 @@ impl ProbeResponse {
             .streams
             .iter()
             .find(|stream| stream.codec_type == "video");
-        let duration = self
-            .format
-            .and_then(|format| format.duration)
+        let format = self.format;
+        let duration = format
+            .as_ref()
+            .and_then(|format| format.duration.as_ref())
             .and_then(|value| value.parse::<f64>().ok())
             .unwrap_or_else(|| {
                 video
@@ -627,6 +643,20 @@ impl ProbeResponse {
             width: video.and_then(|stream| stream.width),
             height: video.and_then(|stream| stream.height),
             codec: video.and_then(|stream| stream.codec_name.clone()),
+            container: format
+                .as_ref()
+                .and_then(|format| format.format_name.clone()),
+            frame_rate: video
+                .and_then(|stream| stream.avg_frame_rate.as_deref())
+                .and_then(parse_frame_rate),
+            rotation_degrees: video
+                .and_then(|stream| stream.tags.as_ref())
+                .and_then(|tags| tags.rotate.as_deref())
+                .and_then(|value| value.parse::<i32>().ok()),
+            creation_timestamp: format
+                .as_ref()
+                .and_then(|format| format.tags.as_ref())
+                .and_then(|tags| tags.creation_time.clone()),
         }
     }
 }
@@ -634,6 +664,8 @@ impl ProbeResponse {
 #[derive(Debug, Deserialize)]
 struct ProbeFormat {
     duration: Option<String>,
+    format_name: Option<String>,
+    tags: Option<ProbeTags>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -645,6 +677,7 @@ struct ProbeStream {
     height: Option<u32>,
     channels: Option<u32>,
     duration: Option<String>,
+    avg_frame_rate: Option<String>,
     tags: Option<ProbeTags>,
     disposition: Option<ProbeDisposition>,
 }
@@ -654,11 +687,22 @@ struct ProbeTags {
     language: Option<String>,
     handler_name: Option<String>,
     name: Option<String>,
+    rotate: Option<String>,
+    creation_time: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ProbeDisposition {
     default: u8,
+}
+
+fn parse_frame_rate(value: &str) -> Option<f64> {
+    let (numerator, denominator) = value.split_once('/')?;
+    let numerator = numerator.parse::<f64>().ok()?;
+    let denominator = denominator.parse::<f64>().ok()?;
+    (denominator > 0.0)
+        .then_some(numerator / denominator)
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
 }
 
 #[cfg(test)]
@@ -682,5 +726,12 @@ mod tests {
             .position(|argument| argument == "source.mp4")
             .expect("source argument");
         assert_eq!(args.get(source_index - 1).map(String::as_str), Some("-i"));
+    }
+
+    #[test]
+    fn frame_rates_are_parsed_defensively() {
+        assert_eq!(parse_frame_rate("60000/1001").unwrap().round(), 60.0);
+        assert_eq!(parse_frame_rate("0/0"), None);
+        assert_eq!(parse_frame_rate("invalid"), None);
     }
 }
