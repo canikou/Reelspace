@@ -2,7 +2,8 @@ use crate::error::{user_error, AppResult};
 use crate::explorer;
 use crate::media;
 use crate::models::{
-    AppSettings, AppSnapshot, Collection, CreateClipRequest, MediaItem, MediaKind, StorageStats,
+    AppSettings, AppSnapshot, AudioTrack, Collection, CreateClipRequest, MediaItem, MediaKind,
+    StorageStats,
 };
 use crate::state::AppState;
 use crate::storage;
@@ -33,6 +34,11 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
 
 #[tauri::command]
 pub fn scan_sources(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
+    let _index_guard = state
+        .media_index_lock
+        .lock()
+        .map_err(|_| user_error("media index lock was poisoned"))?;
+    eprintln!("[media] scanning configured sources");
     let settings = state.db.load_settings()?;
     let existing_items = state.db.list_media(Some(MediaKind::Raw))?;
     let existing = existing_items
@@ -51,10 +57,7 @@ pub fn scan_sources(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
             &excluded_roots,
         )?);
     }
-    let seen = scanned
-        .iter()
-        .map(|item| media::normalized_path_key(Path::new(&item.path)))
-        .collect::<HashSet<_>>();
+    eprintln!("[media] indexed {} source files", scanned.len());
     for item in &scanned {
         let key = media::normalized_path_key(Path::new(&item.path));
         let unchanged = existing
@@ -71,12 +74,18 @@ pub fn scan_sources(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
         let path = Path::new(&item.path);
         if belongs_to_sources(path, &settings.source_folders)
             && !belongs_to_roots(path, &excluded_roots)
-            && !seen.contains(&media::normalized_path_key(path))
+            && !path.exists()
         {
             state.db.delete_media(&item.id)?;
         }
     }
-    repair_missing_thumbnails(&state)?;
+    // Backfill thumbnails for unchanged records too. Older versions could
+    // import media successfully while silently leaving thumbnail_path empty.
+    let (repaired, failures) = repair_missing_thumbnails(&state)?;
+    eprintln!("[media] repaired {repaired} thumbnails during scan");
+    for failure in failures {
+        eprintln!("[media] {failure}");
+    }
     state.db.list_media(Some(MediaKind::Raw))
 }
 
@@ -86,6 +95,49 @@ pub fn list_media(
     kind: Option<MediaKind>,
 ) -> AppResult<Vec<MediaItem>> {
     state.db.list_media(kind)
+}
+
+#[tauri::command]
+pub fn get_media_audio_tracks(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<Vec<AudioTrack>> {
+    let item = state.db.get_media(&id)?;
+    state.ffmpeg.audio_tracks(Path::new(&item.path))
+}
+
+#[tauri::command]
+pub fn get_audio_track_preview(
+    state: State<'_, AppState>,
+    id: String,
+    stream_index: u32,
+) -> AppResult<String> {
+    let item = state.db.get_media(&id)?;
+    let source = Path::new(&item.path);
+    let tracks = state.ffmpeg.audio_tracks(source)?;
+    if !tracks.iter().any(|track| track.index == stream_index) {
+        return Err(user_error("audio track was not found"));
+    }
+    let output = state.audio_preview_dir.join(format!(
+        "{}-{}-{}-{}.m4a",
+        item.id, item.modified_at, item.file_size, stream_index
+    ));
+    state.ffmpeg.audio_preview(source, &output, stream_index)?;
+    Ok(output.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn repair_thumbnails(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
+    let _index_guard = state
+        .media_index_lock
+        .lock()
+        .map_err(|_| user_error("media index lock was poisoned"))?;
+    let (repaired, failures) = repair_missing_thumbnails(&state)?;
+    eprintln!("[media] repaired {repaired} missing thumbnails");
+    for failure in failures {
+        eprintln!("[media] {failure}");
+    }
+    state.db.list_media(None)
 }
 
 #[tauri::command]
@@ -174,6 +226,27 @@ pub fn create_clip(state: State<'_, AppState>, request: CreateClipRequest) -> Ap
     if !Path::new(&source.path).is_file() {
         return Err(user_error("source file is no longer available"));
     }
+    let audio_tracks = state.ffmpeg.audio_tracks(Path::new(&source.path))?;
+    let valid_indices = audio_tracks
+        .iter()
+        .map(|track| track.index)
+        .collect::<HashSet<_>>();
+    let mut selected_tracks = request
+        .enabled_audio_track_indices
+        .clone()
+        .unwrap_or_else(|| audio_tracks.iter().map(|track| track.index).collect());
+    selected_tracks.sort_unstable();
+    selected_tracks.dedup();
+    if selected_tracks
+        .iter()
+        .any(|index| !valid_indices.contains(index))
+    {
+        return Err(user_error("one or more selected audio tracks are invalid"));
+    }
+    let request = CreateClipRequest {
+        enabled_audio_track_indices: Some(selected_tracks),
+        ..request
+    };
     let clip_dir = resolve_clip_dir(&settings, &state.data_dir)?;
     let output_path = media::clip_output_path(&clip_dir, &request, &source);
     let item = media::build_clip_item(
@@ -315,8 +388,10 @@ fn belongs_to_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path_is_within(path, root))
 }
 
-fn repair_missing_thumbnails(state: &State<'_, AppState>) -> AppResult<()> {
+fn repair_missing_thumbnails(state: &State<'_, AppState>) -> AppResult<(usize, Vec<String>)> {
     let items = state.db.list_media(None)?;
+    let mut repaired = 0;
+    let mut failures = Vec::new();
     for item in items {
         let current = item.thumbnail_path.as_ref().map(Path::new);
         let needs_thumbnail = current
@@ -328,18 +403,28 @@ fn repair_missing_thumbnails(state: &State<'_, AppState>) -> AppResult<()> {
             continue;
         }
 
-        if let Ok(Some(thumbnail_path)) = media::ensure_thumbnail(
+        match media::ensure_thumbnail(
             &item.id,
             Path::new(&item.path),
             item.duration_seconds,
             &state.ffmpeg,
             &state.thumbnail_dir,
         ) {
-            let thumbnail = thumbnail_path.to_string_lossy().to_string();
-            state.db.update_thumbnail(&item.id, Some(&thumbnail))?;
+            Ok(Some(thumbnail_path)) => {
+                let thumbnail = thumbnail_path.to_string_lossy().to_string();
+                state.db.update_thumbnail(&item.id, Some(&thumbnail))?;
+                repaired += 1;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                failures.push(format!(
+                    "thumbnail generation failed for {}: {error}",
+                    item.filename
+                ));
+            }
         }
     }
-    Ok(())
+    Ok((repaired, failures))
 }
 
 fn stable_id(value: &str) -> String {

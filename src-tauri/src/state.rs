@@ -4,6 +4,7 @@ use crate::ffmpeg::Ffmpeg;
 use directories::ProjectDirs;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 pub struct AppState {
@@ -11,6 +12,8 @@ pub struct AppState {
     pub ffmpeg: Ffmpeg,
     pub data_dir: PathBuf,
     pub thumbnail_dir: PathBuf,
+    pub audio_preview_dir: PathBuf,
+    pub media_index_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -20,7 +23,9 @@ impl AppState {
             Err(_) => fallback_data_dir()?,
         };
         let thumbnail_dir = data_dir.join("thumbnails");
+        let audio_preview_dir = data_dir.join("audio-previews");
         fs::create_dir_all(&thumbnail_dir)?;
+        fs::create_dir_all(&audio_preview_dir)?;
         let db = Database::open(data_dir.join("reelspace.db"))?;
         let ffmpeg = Ffmpeg::discover(app);
         Ok(Self {
@@ -28,6 +33,8 @@ impl AppState {
             ffmpeg,
             data_dir,
             thumbnail_dir,
+            audio_preview_dir,
+            media_index_lock: Mutex::new(()),
         })
     }
 }

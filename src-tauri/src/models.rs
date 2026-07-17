@@ -103,7 +103,19 @@ pub struct CreateClipRequest {
     pub start_seconds: f64,
     pub end_seconds: f64,
     pub title: Option<String>,
-    pub accurate: bool,
+    #[serde(default)]
+    pub enabled_audio_track_indices: Option<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioTrack {
+    pub index: u32,
+    pub codec: Option<String>,
+    pub channels: Option<u32>,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

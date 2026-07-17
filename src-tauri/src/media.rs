@@ -71,7 +71,11 @@ pub fn build_clip_item(
         &temp_path,
         request.start_seconds,
         request.end_seconds,
-        request.accurate,
+        true,
+        request
+            .enabled_audio_track_indices
+            .as_deref()
+            .unwrap_or_default(),
     );
     if let Err(error) = trim_result {
         let _ = std::fs::remove_file(&temp_path);
@@ -89,7 +93,10 @@ pub fn build_clip_item(
         let _ = std::fs::remove_file(&temp_path);
         return Err(user_error("a clip already exists at the generated path"));
     }
-    std::fs::rename(&temp_path, &output_path)?;
+    if let Err(error) = std::fs::rename(&temp_path, &output_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
     let mut item = match build_item_base(&output_path, MediaKind::Clip, ffmpeg, thumbnail_dir) {
         Ok(item) => item,
         Err(error) => {
@@ -113,26 +120,38 @@ pub fn ensure_thumbnail(
     thumbnail_dir: &Path,
 ) -> AppResult<Option<PathBuf>> {
     let thumbnail_path = thumbnail_dir.join(format!("{id}.jpg"));
+    let temp_path = thumbnail_dir.join(format!("{id}.part.jpg"));
     if is_usable_thumbnail(&thumbnail_path) {
         return Ok(Some(thumbnail_path));
     }
 
-    if thumbnail_path.exists() {
-        let _ = std::fs::remove_file(&thumbnail_path);
-    }
+    let _ = std::fs::remove_file(&temp_path);
 
+    let mut last_error = None;
     for at in thumbnail_offsets(duration_seconds) {
-        if ffmpeg.thumbnail(path, &thumbnail_path, at).is_ok()
-            && is_usable_thumbnail(&thumbnail_path)
-        {
-            return Ok(Some(thumbnail_path));
+        match ffmpeg.thumbnail(path, &temp_path, at) {
+            Ok(()) if is_usable_thumbnail(&temp_path) => {
+                if thumbnail_path.exists() {
+                    std::fs::remove_file(&thumbnail_path)?;
+                }
+                std::fs::rename(&temp_path, &thumbnail_path)?;
+                return Ok(Some(thumbnail_path));
+            }
+            Ok(()) => {
+                last_error = Some(user_error("FFmpeg produced an empty thumbnail"));
+            }
+            Err(error) => last_error = Some(error),
         }
-        if thumbnail_path.exists() {
-            let _ = std::fs::remove_file(&thumbnail_path);
+        if temp_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
         }
     }
 
-    Ok(None)
+    if let Some(error) = last_error {
+        Err(error)
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn clip_output_path(
@@ -153,6 +172,9 @@ pub fn clip_output_path(
 }
 
 fn build_raw_item(path: &Path, ffmpeg: &Ffmpeg, thumbnail_dir: &Path) -> AppResult<MediaItem> {
+    // This function is only reached for new or changed sources. A stable path
+    // ID must not make a replacement file reuse the previous frame forever.
+    let _ = std::fs::remove_file(thumbnail_dir.join(format!("{}.jpg", stable_id(path))));
     let mut item = build_item_base(path, MediaKind::Raw, ffmpeg, thumbnail_dir)?;
     item.tags = vec![infer_shadowplay_tag(path)];
     Ok(item)
