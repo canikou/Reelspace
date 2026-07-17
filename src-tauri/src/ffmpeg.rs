@@ -75,11 +75,6 @@ impl Ffmpeg {
         let manifest_ffmpeg = existing_file(manifest_vendor.join("ffmpeg.exe"));
         #[cfg(debug_assertions)]
         let manifest_ffprobe = existing_file(manifest_vendor.join("ffprobe.exe"));
-        #[cfg(not(debug_assertions))]
-        let manifest_ffmpeg = None;
-        #[cfg(not(debug_assertions))]
-        let manifest_ffprobe = None;
-
         #[cfg(debug_assertions)]
         let ffmpeg_path = bundled_ffmpeg
             .or(manifest_ffmpeg)
