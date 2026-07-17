@@ -613,5 +613,48 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn clip_destinations_never_overwrite_an_existing_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "reelspace-clip-collision-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE_FOR_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let source = MediaItem {
+            id: "a".repeat(64),
+            kind: MediaKind::Raw,
+            path: directory.join("source.mp4").to_string_lossy().to_string(),
+            source_path: None,
+            filename: "source.mp4".to_string(),
+            file_size: 1,
+            duration_seconds: 10.0,
+            width: None,
+            height: None,
+            codec: None,
+            tags: Vec::new(),
+            notes: None,
+            thumbnail_path: None,
+            created_at: 1,
+            modified_at: 1,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+        };
+        let request = CreateClipRequest {
+            source_id: source.id.clone(),
+            session_id: None,
+            start_seconds: 1.0,
+            end_seconds: 2.0,
+            title: Some("highlight".to_string()),
+            enabled_audio_track_indices: Some(Vec::new()),
+        };
+        let first = clip_output_path(&directory, &request, &source);
+        std::fs::write(&first, b"original").expect("existing clip");
+        let second = clip_output_path(&directory, &request, &source);
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).expect("preserved"), b"original");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     static TEMP_SEQUENCE_FOR_TEST: AtomicU64 = AtomicU64::new(1);
 }

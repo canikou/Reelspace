@@ -573,16 +573,11 @@ fn create_clip_inner(state: &AppState, request: CreateClipRequest) -> AppResult<
             "Clips must be created from raw media",
         ));
     }
-    if !request.start_seconds.is_finite()
-        || !request.end_seconds.is_finite()
-        || request.start_seconds < 0.0
-        || request.end_seconds <= request.start_seconds
-    {
-        return Err(user_error("trim range is invalid"));
-    }
-    if source.duration_seconds > 0.0 && request.end_seconds > source.duration_seconds + 0.05 {
-        return Err(user_error("trim end exceeds the source duration"));
-    }
+    validate_trim_range(
+        request.start_seconds,
+        request.end_seconds,
+        source.duration_seconds,
+    )?;
     if !Path::new(&source.path).is_file() {
         return Err(app_error(
             ErrorCode::SourceUnavailable,
@@ -666,6 +661,23 @@ pub fn get_cleanup_candidates(state: State<'_, AppState>) -> AppResult<Vec<Media
 pub fn delete_raw_file(state: State<'_, AppState>, id: String) -> AppResult<Vec<MediaItem>> {
     validate_id(&id, "media")?;
     let item = state.db.get_media(&id)?;
+    let settings = state.db.load_settings()?;
+    let path = validated_raw_deletion_path(&item, &settings)?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    state.db.delete_media(&id)?;
+    remove_audio_previews_for_media(&state.audio_preview_dir, &id, &state);
+    if let Some(thumbnail) = item.thumbnail_path {
+        let thumbnail = PathBuf::from(thumbnail);
+        if thumbnail.starts_with(&state.thumbnail_dir) && thumbnail.is_file() {
+            let _ = std::fs::remove_file(thumbnail);
+        }
+    }
+    state.db.list_media(Some(MediaKind::Raw))
+}
+
+fn validated_raw_deletion_path(item: &MediaItem, settings: &AppSettings) -> AppResult<PathBuf> {
     if item.kind != MediaKind::Raw {
         return Err(app_error(
             ErrorCode::InvalidRequest,
@@ -673,7 +685,6 @@ pub fn delete_raw_file(state: State<'_, AppState>, id: String) -> AppResult<Vec<
         ));
     }
     let path = PathBuf::from(&item.path);
-    let settings = state.db.load_settings()?;
     let canonical_path = path.canonicalize().map_err(|error| {
         app_error(
             ErrorCode::SourceUnavailable,
@@ -694,18 +705,17 @@ pub fn delete_raw_file(state: State<'_, AppState>, id: String) -> AppResult<Vec<
             "Cleanup refused a file outside the configured raw source folders",
         ));
     }
-    if path.exists() {
-        std::fs::remove_file(&path)?;
+    Ok(canonical_path)
+}
+
+fn validate_trim_range(start: f64, end: f64, duration: f64) -> AppResult<()> {
+    if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+        return Err(user_error("trim range is invalid"));
     }
-    state.db.delete_media(&id)?;
-    remove_audio_previews_for_media(&state.audio_preview_dir, &id, &state);
-    if let Some(thumbnail) = item.thumbnail_path {
-        let thumbnail = PathBuf::from(thumbnail);
-        if thumbnail.starts_with(&state.thumbnail_dir) && thumbnail.is_file() {
-            let _ = std::fs::remove_file(thumbnail);
-        }
+    if duration > 0.0 && end > duration + 0.05 {
+        return Err(user_error("trim end exceeds the source duration"));
     }
-    state.db.list_media(Some(MediaKind::Raw))
+    Ok(())
 }
 
 fn resolve_clip_dir(settings: &AppSettings, data_dir: &Path) -> AppResult<PathBuf> {
@@ -1102,5 +1112,39 @@ mod tests {
         assert!(validate_id("../media", "media").is_err());
         assert!(validate_session_id("trim-session:42").is_ok());
         assert!(validate_session_id("bad/session").is_err());
+    }
+
+    #[test]
+    fn invalid_trim_ranges_are_rejected() {
+        assert!(validate_trim_range(f64::NAN, 2.0, 10.0).is_err());
+        assert!(validate_trim_range(2.0, 2.0, 10.0).is_err());
+        assert!(validate_trim_range(0.0, 11.0, 10.0).is_err());
+        assert!(validate_trim_range(1.0, 2.0, 10.0).is_ok());
+    }
+
+    #[test]
+    fn generated_clips_are_rejected_by_raw_deletion_validation() {
+        let clip = MediaItem {
+            id: "a".repeat(64),
+            kind: MediaKind::Clip,
+            path: "C:\\clips\\protected.mp4".to_string(),
+            source_path: Some("C:\\captures\\source.mp4".to_string()),
+            filename: "protected.mp4".to_string(),
+            file_size: 1,
+            duration_seconds: 1.0,
+            width: None,
+            height: None,
+            codec: None,
+            tags: Vec::new(),
+            notes: None,
+            thumbnail_path: None,
+            created_at: 1,
+            modified_at: 1,
+            trim_start_seconds: Some(0.0),
+            trim_end_seconds: Some(1.0),
+        };
+        let error = validated_raw_deletion_path(&clip, &AppSettings::default())
+            .expect_err("clip deletion must fail");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 }
