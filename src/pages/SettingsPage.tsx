@@ -1,5 +1,5 @@
 import { FolderPlus, Save } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { pickFolder } from "../lib/dialog";
 import { formatBytes } from "../lib/format";
 import type { AppSettings, AppSnapshot } from "../lib/types";
@@ -19,9 +19,19 @@ export function SettingsPage({
   );
   const [threshold, setThreshold] = useState(String(snapshot.settings.cleanupThresholdPercent));
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSourceFolders(snapshot.settings.sourceFolders.join("\n"));
+    setWorkingFolder(snapshot.settings.workingFolder ?? "");
+    setClipFolder(snapshot.settings.clipFolder ?? "");
+    setLimitGb(snapshot.settings.storageLimitBytes ? String(Math.round(snapshot.settings.storageLimitBytes / 1024 / 1024 / 1024)) : "");
+    setThreshold(String(snapshot.settings.cleanupThresholdPercent));
+  }, [snapshot]);
 
   async function save() {
     setBusy(true);
+    setError(null);
     try {
       await onSave({
         sourceFolders: sourceFolders.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
@@ -30,6 +40,8 @@ export function SettingsPage({
         storageLimitBytes: limitGb ? Number(limitGb) * 1024 * 1024 * 1024 : null,
         cleanupThresholdPercent: Math.max(50, Math.min(99, Number(threshold) || 90))
       });
+    } catch (reason) {
+      setError(String(reason));
     } finally {
       setBusy(false);
     }
@@ -92,11 +104,11 @@ export function SettingsPage({
         <h2>Storage</h2>
         <label>
           Storage limit in GB
-          <input value={limitGb} onChange={(event) => setLimitGb(event.target.value)} inputMode="numeric" placeholder="Optional" />
+          <input type="number" min="1" value={limitGb} onChange={(event) => setLimitGb(event.target.value)} inputMode="numeric" placeholder="Optional" />
         </label>
         <label>
           Cleanup warning threshold
-          <input value={threshold} onChange={(event) => setThreshold(event.target.value)} inputMode="numeric" />
+          <input type="number" min="50" max="99" value={threshold} onChange={(event) => setThreshold(event.target.value)} inputMode="numeric" />
         </label>
         <p className="muted">Current managed usage: {formatBytes(snapshot.stats.managedBytes)}</p>
       </section>
@@ -105,11 +117,15 @@ export function SettingsPage({
         <div className={snapshot.ffmpeg.ready ? "tool-health ready" : "tool-health"}>
           <strong>{snapshot.ffmpeg.ready ? "Ready" : "Missing"}</strong>
           <span>{snapshot.ffmpeg.message}</span>
-          <code>{snapshot.ffmpeg.ffmpegPath ?? "ffmpeg.exe not found"}</code>
-          <code>{snapshot.ffmpeg.ffprobePath ?? "ffprobe.exe not found"}</code>
+          <details>
+            <summary>Tool paths</summary>
+            <code>{snapshot.ffmpeg.ffmpegPath ?? "ffmpeg.exe not found"}</code>
+            <code>{snapshot.ffmpeg.ffprobePath ?? "ffprobe.exe not found"}</code>
+          </details>
         </div>
       </section>
       <div className="settings-actions">
+        {error ? <div className="inline-error">{error}</div> : null}
         <button className="primary-button" onClick={save} disabled={busy} title="Save settings">
           <Save size={17} />
           {busy ? "Saving..." : "Save Settings"}

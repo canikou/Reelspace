@@ -26,6 +26,7 @@ export function Sidebar({ page, onPageChange }: { page: PageKey; onPageChange: (
               onClick={() => onPageChange(item.key)}
               title={item.label}
               aria-label={item.label}
+              aria-current={page === item.key ? "page" : undefined}
             >
               <Icon size={22} />
             </button>

@@ -1,36 +1,60 @@
-import { Plus } from "lucide-react";
-import type { Collection } from "../lib/types";
+import { ArrowLeft, FolderHeart, Plus } from "lucide-react";
+import { MediaLibrary } from "../components/MediaLibrary";
+import type { MediaActions } from "../components/MediaCard";
+import type { Collection, MediaItem } from "../lib/types";
 
 export function CollectionsPage({
   collections,
-  onCreate
+  selected,
+  items,
+  actions,
+  onCreate,
+  onSelect,
+  onBack
 }: {
   collections: Collection[];
-  onCreate: (name: string) => Promise<void>;
+  selected: Collection | null;
+  items: MediaItem[];
+  actions: MediaActions;
+  onCreate: () => void;
+  onSelect: (collection: Collection) => void;
+  onBack: () => void;
 }) {
-  async function create() {
-    const name = window.prompt("Collection name");
-    if (!name) return;
-    await onCreate(name);
+  if (selected) {
+    return (
+      <div className="page-stack">
+        <div className="section-title collection-heading">
+          <div>
+            <button className="bare-icon" onClick={onBack} aria-label="Back to collections" title="Back to collections"><ArrowLeft size={18} /></button>
+            <h2>{selected.name}</h2>
+            <span>{items.length}</span>
+          </div>
+        </div>
+        <MediaLibrary items={items} actions={actions} empty="This collection is empty." />
+      </div>
+    );
   }
 
   return (
     <div className="page-stack">
       <div className="section-title">
-        <h2>Collections</h2>
-        <button onClick={create} title="Create collection"><Plus size={17} /> New</button>
+        <div><h2>Collections</h2><span>{collections.length}</span></div>
+        <button onClick={onCreate} title="Create collection"><Plus size={17} /> New</button>
       </div>
       {collections.length ? (
         <section className="collection-grid">
           {collections.map((collection) => (
-            <article className="collection-card" key={collection.id}>
-              <h3>{collection.name}</h3>
-              <p>{collection.itemCount} item{collection.itemCount === 1 ? "" : "s"}</p>
-            </article>
+            <button className="collection-card" key={collection.id} onClick={() => onSelect(collection)}>
+              <span className="collection-icon"><FolderHeart size={21} /></span>
+              <span>
+                <strong>{collection.name}</strong>
+                <small>{collection.itemCount} item{collection.itemCount === 1 ? "" : "s"}</small>
+              </span>
+            </button>
           ))}
         </section>
       ) : (
-        <div className="empty-state">Collections you create will appear here.</div>
+        <button className="empty-state empty-action" onClick={onCreate}><Plus size={20} /> Create your first collection</button>
       )}
     </div>
   );

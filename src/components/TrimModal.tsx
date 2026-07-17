@@ -1,5 +1,5 @@
 import { Save, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, mediaSrc } from "../lib/api";
 import { formatDuration } from "../lib/format";
 import type { MediaItem } from "../lib/types";
@@ -24,6 +24,14 @@ export function TrimModal({
 
   const duration = Math.max(1, Math.floor(item.durationSeconds || 1));
   const span = useMemo(() => Math.max(0, end - start), [end, start]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !busy) onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
 
   function updateStart(value: number) {
     const next = Math.min(Math.max(0, value), end - 1);
@@ -58,13 +66,13 @@ export function TrimModal({
 
   return (
     <div className="modal-backdrop">
-      <section className="trim-modal">
+      <section className="trim-modal" role="dialog" aria-modal="true" aria-labelledby="trim-title">
         <header className="modal-header">
           <div>
-            <h2>Trim</h2>
+            <h2 id="trim-title">Trim</h2>
             <p>{item.filename}</p>
           </div>
-          <button title="Close" onClick={onClose}><X size={18} /></button>
+          <button title="Close" aria-label="Close" onClick={onClose}><X size={18} /></button>
         </header>
         <video
           ref={videoRef}
@@ -97,6 +105,7 @@ export function TrimModal({
               value={start}
               onChange={(event) => updateStart(Number(event.target.value))}
               title="Trim start"
+              aria-label="Trim start"
             />
             <input
               type="range"
@@ -106,6 +115,7 @@ export function TrimModal({
               value={end}
               onChange={(event) => updateEnd(Number(event.target.value))}
               title="Trim end"
+              aria-label="Trim end"
             />
           </div>
           {error ? <div className="error-banner">{error}</div> : null}

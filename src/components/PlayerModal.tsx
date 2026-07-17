@@ -22,15 +22,15 @@ export function PlayerModal({ item, onClose }: { item: MediaItem; onClose: () =>
 
   return (
     <div className="modal-backdrop">
-      <section className="player-modal">
+      <section className="player-modal" role="dialog" aria-modal="true" aria-labelledby="player-title">
         <header className="modal-header">
           <div>
-            <h2>{item.filename}</h2>
+            <h2 id="player-title">{item.filename}</h2>
             <p>{item.tags.join(", ") || "Untagged"}</p>
           </div>
           <div className="modal-actions">
-            <button title="Fullscreen" onClick={() => videoRef.current?.requestFullscreen()}><Maximize2 size={18} /></button>
-            <button title="Close" onClick={onClose}><X size={18} /></button>
+            <button title="Fullscreen" aria-label="Fullscreen" onClick={() => videoRef.current?.requestFullscreen()}><Maximize2 size={18} /></button>
+            <button title="Close" aria-label="Close" onClick={onClose}><X size={18} /></button>
           </div>
         </header>
         {error ? <div className="player-error">{error}</div> : null}

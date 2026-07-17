@@ -21,7 +21,7 @@ export function HomePage({
   const oldestRaw = [...rawItems].sort((a, b) => a.createdAt - b.createdAt).slice(0, 5);
   return (
     <div className="page-stack">
-      <StatGrid stats={snapshot.stats} />
+      <StatGrid stats={snapshot.stats} rawCount={rawItems.length} clipCount={clipItems.length} />
       {snapshot.stats.isNearLimit ? (
         <section className="cleanup-band">
           <AlertTriangle size={22} />
@@ -31,7 +31,7 @@ export function HomePage({
           </div>
           {oldestRaw[0] ? (
             <button onClick={() => onCleanup(oldestRaw[0])} title="Delete the oldest raw file">
-              Clean {formatBytes(oldestRaw[0].fileSize)}
+              Review {formatBytes(oldestRaw[0].fileSize)}
             </button>
           ) : null}
         </section>

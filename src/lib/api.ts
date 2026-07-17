@@ -23,6 +23,8 @@ export const api = {
   updateMediaNotes: (id: string, notes?: string | null) =>
     invoke<MediaItem>("update_media_notes", { id, notes }),
   listCollections: () => invoke<Collection[]>("list_collections"),
+  listCollectionMedia: (collectionId: string) =>
+    invoke<MediaItem[]>("list_collection_media", { collectionId }),
   createCollection: (name: string) => invoke<Collection[]>("create_collection", { name }),
   addToCollection: (collectionId: string, mediaId: string) =>
     invoke<Collection[]>("add_to_collection", { collectionId, mediaId }),
