@@ -31,6 +31,21 @@ Installed-app diagnostics are JSON lines in the application data `logs` director
 
 Runner transcripts are under `logs\runners`. The runner reports its revision, normalized mode, Node, pnpm, Rust, Cargo, Tauri, MSVC target, bundled FFmpeg versions, command failures, exit code, and log path.
 
+Rust panics are written as structured reports under the application `recovery` directory. An active-session marker is removed on graceful exit; if it remains after an interruption, the next launch records an unclean-shutdown recovery event and resumes persistent thumbnail work.
+
+If SQLite cannot be opened or fails its integrity check, Reelspace renames the database and its WAL/SHM sidecars with a timestamped `.corrupt-*` suffix before creating a clean rebuildable index. The quarantined database is never overwritten. A database created by a newer Reelspace schema is preserved and rejected instead of being reset.
+
+## Large-Library Benchmark
+
+Run the real scanner without launching the UI:
+
+```powershell
+$env:REELSPACE_BENCHMARK_REPORT='D:\path\to\report.json'
+cargo run --release --example library_benchmark -- 'D:\path\to\recordings'
+```
+
+The harness treats media roots as read-only. Its SQLite database and thumbnail directory are created under the system temporary directory, and it refuses to put scratch state or the report inside a source root. It performs one cold FFprobe pass and five cached passes, reporting failures by stable error code.
+
 ## Safe Recovery
 
 - Preserve the database before manual recovery.
