@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
+set "REELSPACE_ORIGINAL_PATH=%PATH%"
 
 if defined REELSPACE_LOGGING goto :inner_main
 
@@ -162,12 +163,14 @@ echo Cargo bin: %CARGO_HOME%\bin
 if exist "C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
   echo MSVC environment: C:\BuildTools
   call "C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
+  call :restore_runner_tools
   exit /b 0
 )
 
 if exist "%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
   echo MSVC environment: %ProgramFiles%\Microsoft Visual Studio\2022\BuildTools
   call "%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
+  call :restore_runner_tools
   exit /b 0
 )
 
@@ -176,6 +179,7 @@ if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" (
     if exist "%%I\VC\Auxiliary\Build\vcvars64.bat" (
       echo MSVC environment: %%I
       call "%%I\VC\Auxiliary\Build\vcvars64.bat" >nul
+      call :restore_runner_tools
       exit /b 0
     )
   )
@@ -184,3 +188,9 @@ if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" (
 echo ERROR: MSVC environment was not found.
 echo Install Visual Studio Build Tools with the C++ workload.
 exit /b 1
+
+:restore_runner_tools
+set "PATH=%CARGO_HOME%\bin;%REELSPACE_ORIGINAL_PATH%;%PATH%"
+if exist "D:\Coding\.tools\nodejs" set "PATH=D:\Coding\.tools\nodejs;D:\Coding\.tools\nodejs\node_modules\corepack\shims;%PATH%"
+if exist "%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback" set "PATH=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback;%PATH%"
+exit /b 0
