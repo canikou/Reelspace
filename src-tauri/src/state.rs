@@ -2,6 +2,7 @@ use crate::db::Database;
 use crate::error::AppResult;
 use crate::ffmpeg::Ffmpeg;
 use crate::jobs::{MediaJobQueue, PreviewCoordinator, ThumbnailScheduler};
+use crate::recovery::RecoveryJournal;
 use crate::telemetry::Telemetry;
 use directories::ProjectDirs;
 use std::fs;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub preview_coordinator: Arc<PreviewCoordinator>,
     pub thumbnail_scheduler: Arc<ThumbnailScheduler>,
     pub telemetry: Arc<Telemetry>,
+    pub recovery: Arc<RecoveryJournal>,
 }
 
 impl AppState {
@@ -39,9 +41,29 @@ impl AppState {
         let audio_preview_dir = data_dir.join("audio-previews");
         fs::create_dir_all(&thumbnail_dir)?;
         fs::create_dir_all(&audio_preview_dir)?;
-        let db = Arc::new(Database::open(data_dir.join("reelspace.db"))?);
-        let ffmpeg = Ffmpeg::discover(app);
         let telemetry = Arc::new(Telemetry::new(&data_dir.join("logs"))?);
+        let recovery = Arc::new(RecoveryJournal::begin(&data_dir)?);
+        let (database, database_recovery) =
+            Database::open_resilient(data_dir.join("reelspace.db"))?;
+        let db = Arc::new(database);
+        if let Some(recovered) = database_recovery {
+            telemetry.event(
+                "error",
+                "database.self_healed",
+                serde_json::json!({
+                    "reason": recovered.original_error,
+                    "backupPath": recovered.backup_path,
+                }),
+            );
+        }
+        if recovery.recovered_unclean_session {
+            telemetry.event(
+                "warn",
+                "app.unclean_shutdown_recovered",
+                serde_json::json!({ "action": "resumed_persistent_jobs" }),
+            );
+        }
+        let ffmpeg = Ffmpeg::discover(app);
         Ok(Self {
             db,
             ffmpeg,
@@ -58,6 +80,7 @@ impl AppState {
             preview_coordinator: Arc::new(PreviewCoordinator::default()),
             thumbnail_scheduler: Arc::new(ThumbnailScheduler::default()),
             telemetry,
+            recovery,
         })
     }
 }

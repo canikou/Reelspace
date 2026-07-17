@@ -23,6 +23,7 @@ pub struct ScanFolderResult {
     pub files_skipped: usize,
     pub traversal_errors: usize,
     pub changed_path_keys: HashSet<String>,
+    pub failures_by_code: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +129,7 @@ pub fn scan_folder(
         files_skipped: 0,
         traversal_errors,
         changed_path_keys: HashSet::new(),
+        failures_by_code: HashMap::new(),
     };
     for path in files {
         let key = normalized_path_key(&path);
@@ -143,8 +145,11 @@ pub fn scan_folder(
                 }
             }
         }
-        match build_raw_item(&path, ffmpeg, database, thumbnail_dir) {
-            Ok((item, cache_hit)) => {
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_raw_item(&path, ffmpeg, database, thumbnail_dir)
+        }));
+        match built {
+            Ok(Ok((item, cache_hit))) => {
                 result.files_changed += 1;
                 result.changed_path_keys.insert(key);
                 if cache_hit {
@@ -154,7 +159,20 @@ pub fn scan_folder(
                 }
                 result.items.push(item);
             }
-            Err(_) => result.files_skipped += 1,
+            Ok(Err(error)) => {
+                result.files_skipped += 1;
+                *result
+                    .failures_by_code
+                    .entry(error.code.as_str().to_string())
+                    .or_default() += 1;
+            }
+            Err(_) => {
+                result.files_skipped += 1;
+                *result
+                    .failures_by_code
+                    .entry(ErrorCode::Internal.as_str().to_string())
+                    .or_default() += 1;
+            }
         }
     }
     Ok(result)

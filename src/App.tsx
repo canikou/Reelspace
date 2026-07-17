@@ -59,12 +59,12 @@ export function App() {
       api.listCollections()
     ] as const);
     if (generation !== refreshGeneration.current) return;
-    const failures: string[] = [];
-    if (results[0].status === "fulfilled") setSnapshot(results[0].value); else failures.push(String(results[0].reason));
-    if (results[1].status === "fulfilled") setRawItems(results[1].value); else failures.push(String(results[1].reason));
-    if (results[2].status === "fulfilled") setClipItems(results[2].value); else failures.push(String(results[2].reason));
-    if (results[3].status === "fulfilled") setCollections(results[3].value); else failures.push(String(results[3].reason));
-    if (failures.length) throw new Error(failures[0]);
+    const failures: unknown[] = [];
+    if (results[0].status === "fulfilled") setSnapshot(results[0].value); else failures.push(results[0].reason);
+    if (results[1].status === "fulfilled") setRawItems(results[1].value); else failures.push(results[1].reason);
+    if (results[2].status === "fulfilled") setClipItems(results[2].value); else failures.push(results[2].reason);
+    if (results[3].status === "fulfilled") setCollections(results[3].value); else failures.push(results[3].reason);
+    if (failures.length) throw normalizeAppError(failures[0]);
   }, []);
 
   useEffect(() => {

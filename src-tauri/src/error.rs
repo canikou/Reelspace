@@ -34,6 +34,40 @@ pub enum ErrorCode {
     Internal,
 }
 
+impl ErrorCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalidRequest",
+            Self::InvalidPath => "invalidPath",
+            Self::PathOutsideManagedRoots => "pathOutsideManagedRoots",
+            Self::SourceUnavailable => "sourceUnavailable",
+            Self::PermissionDenied => "permissionDenied",
+            Self::FileNotFound => "fileNotFound",
+            Self::FileChanged => "fileChanged",
+            Self::UnsupportedMedia => "unsupportedMedia",
+            Self::CorruptMedia => "corruptMedia",
+            Self::FfprobeUnavailable => "ffprobeUnavailable",
+            Self::FfprobeFailed => "ffprobeFailed",
+            Self::FfmpegUnavailable => "ffmpegUnavailable",
+            Self::FfmpegFailed => "ffmpegFailed",
+            Self::MediaProcessTimeout => "mediaProcessTimeout",
+            Self::MediaProcessCancelled => "mediaProcessCancelled",
+            Self::DatabaseUnavailable => "databaseUnavailable",
+            Self::DatabaseBusy => "databaseBusy",
+            Self::DatabaseMigrationFailed => "databaseMigrationFailed",
+            Self::DatabaseIntegrityFailed => "databaseIntegrityFailed",
+            Self::DiskFull => "diskFull",
+            Self::DestinationCollision => "destinationCollision",
+            Self::ExportCancelled => "exportCancelled",
+            Self::ExportFailed => "exportFailed",
+            Self::ThumbnailGenerationFailed => "thumbnailGenerationFailed",
+            Self::CacheOperationFailed => "cacheOperationFailed",
+            Self::WindowsIntegrationFailed => "windowsIntegrationFailed",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppError {
@@ -104,24 +138,42 @@ impl From<std::io::Error> for AppError {
 
 impl From<rusqlite::Error> for AppError {
     fn from(error: rusqlite::Error) -> Self {
-        let busy = matches!(
-            &error,
-            rusqlite::Error::SqliteFailure(failure, _)
-                if matches!(
-                    failure.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                )
-        );
-        let (code, message) = if busy {
-            (
-                ErrorCode::DatabaseBusy,
-                "The media library is busy; try again in a moment",
-            )
-        } else {
-            (
+        let (code, message) = match &error {
+            rusqlite::Error::SqliteFailure(failure, _) => match failure.code {
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => (
+                    ErrorCode::DatabaseBusy,
+                    "The media library is busy; try again in a moment",
+                ),
+                rusqlite::ErrorCode::DiskFull => (
+                    ErrorCode::DiskFull,
+                    "There is not enough free disk space to update the media library",
+                ),
+                rusqlite::ErrorCode::PermissionDenied
+                | rusqlite::ErrorCode::ReadOnly
+                | rusqlite::ErrorCode::AuthorizationForStatementDenied => (
+                    ErrorCode::PermissionDenied,
+                    "Reelspace does not have permission to update its media library",
+                ),
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => (
+                    ErrorCode::DatabaseIntegrityFailed,
+                    "The local media library is damaged and needs recovery",
+                ),
+                rusqlite::ErrorCode::ConstraintViolation
+                | rusqlite::ErrorCode::TypeMismatch
+                | rusqlite::ErrorCode::TooBig
+                | rusqlite::ErrorCode::ParameterOutOfRange => (
+                    ErrorCode::InvalidRequest,
+                    "The requested library update contains invalid data",
+                ),
+                _ => (
+                    ErrorCode::DatabaseUnavailable,
+                    "The local media library could not be updated",
+                ),
+            },
+            _ => (
                 ErrorCode::DatabaseUnavailable,
                 "The local media library could not be updated",
-            )
+            ),
         };
         Self::new(code, message).with_detail(error.to_string())
     }
@@ -200,5 +252,96 @@ mod tests {
         let error = AppError::cancelled("Clip export");
         assert_eq!(error.code, ErrorCode::MediaProcessCancelled);
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn every_error_code_has_a_unique_wire_name() {
+        let codes = [
+            ErrorCode::InvalidRequest,
+            ErrorCode::InvalidPath,
+            ErrorCode::PathOutsideManagedRoots,
+            ErrorCode::SourceUnavailable,
+            ErrorCode::PermissionDenied,
+            ErrorCode::FileNotFound,
+            ErrorCode::FileChanged,
+            ErrorCode::UnsupportedMedia,
+            ErrorCode::CorruptMedia,
+            ErrorCode::FfprobeUnavailable,
+            ErrorCode::FfprobeFailed,
+            ErrorCode::FfmpegUnavailable,
+            ErrorCode::FfmpegFailed,
+            ErrorCode::MediaProcessTimeout,
+            ErrorCode::MediaProcessCancelled,
+            ErrorCode::DatabaseUnavailable,
+            ErrorCode::DatabaseBusy,
+            ErrorCode::DatabaseMigrationFailed,
+            ErrorCode::DatabaseIntegrityFailed,
+            ErrorCode::DiskFull,
+            ErrorCode::DestinationCollision,
+            ErrorCode::ExportCancelled,
+            ErrorCode::ExportFailed,
+            ErrorCode::ThumbnailGenerationFailed,
+            ErrorCode::CacheOperationFailed,
+            ErrorCode::WindowsIntegrationFailed,
+            ErrorCode::Internal,
+        ];
+        let names = codes
+            .iter()
+            .map(|code| code.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(names.len(), codes.len());
+        for code in codes {
+            let serialized = serde_json::to_value(AppError::new(code, "safe")).expect("serialize");
+            assert_eq!(serialized["code"], code.as_str());
+        }
+    }
+
+    #[test]
+    fn io_failures_map_to_safe_specific_categories() {
+        let cases = [
+            (std::io::ErrorKind::NotFound, ErrorCode::FileNotFound),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                ErrorCode::PermissionDenied,
+            ),
+            (std::io::ErrorKind::InvalidInput, ErrorCode::InvalidPath),
+            (std::io::ErrorKind::InvalidData, ErrorCode::InvalidPath),
+            (std::io::ErrorKind::UnexpectedEof, ErrorCode::Internal),
+        ];
+        for (kind, expected) in cases {
+            let error = AppError::from(std::io::Error::new(kind, "private-path"));
+            assert_eq!(error.code, expected);
+            assert!(!serde_json::to_string(&error)
+                .expect("serialize")
+                .contains("private-path"));
+        }
+        let disk_full = AppError::from(std::io::Error::from_raw_os_error(112));
+        assert_eq!(disk_full.code, ErrorCode::DiskFull);
+    }
+
+    #[test]
+    fn sqlite_failures_keep_recovery_categories_specific() {
+        let cases = [
+            (rusqlite::ffi::SQLITE_BUSY, ErrorCode::DatabaseBusy),
+            (rusqlite::ffi::SQLITE_LOCKED, ErrorCode::DatabaseBusy),
+            (rusqlite::ffi::SQLITE_FULL, ErrorCode::DiskFull),
+            (rusqlite::ffi::SQLITE_PERM, ErrorCode::PermissionDenied),
+            (rusqlite::ffi::SQLITE_READONLY, ErrorCode::PermissionDenied),
+            (
+                rusqlite::ffi::SQLITE_CORRUPT,
+                ErrorCode::DatabaseIntegrityFailed,
+            ),
+            (
+                rusqlite::ffi::SQLITE_NOTADB,
+                ErrorCode::DatabaseIntegrityFailed,
+            ),
+            (rusqlite::ffi::SQLITE_CONSTRAINT, ErrorCode::InvalidRequest),
+            (rusqlite::ffi::SQLITE_IOERR, ErrorCode::DatabaseUnavailable),
+        ];
+        for (sqlite_code, expected) in cases {
+            let sqlite = rusqlite::ffi::Error::new(sqlite_code);
+            let error = AppError::from(rusqlite::Error::SqliteFailure(sqlite, None));
+            assert_eq!(error.code, expected);
+        }
     }
 }

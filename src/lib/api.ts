@@ -48,7 +48,7 @@ export function normalizeAppError(value: unknown): ReelspaceError {
   }
   return new ReelspaceError({
     code: "internal",
-    message: value instanceof Error ? value.message : "An unexpected Reelspace error occurred",
+    message: "An unexpected Reelspace error occurred",
     retryable: false
   });
 }

@@ -10,6 +10,12 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DatabaseRecovery {
+    pub backup_path: PathBuf,
+    pub original_error: ErrorCode,
+}
+
 pub struct ThumbnailJob {
     pub media_id: String,
     pub source_path: String,
@@ -22,6 +28,32 @@ const DATABASE_SCHEMA_VERSION: i64 = 3;
 pub const PROBE_SCHEMA_VERSION: i64 = 1;
 
 impl Database {
+    pub fn open_resilient(path: PathBuf) -> AppResult<(Self, Option<DatabaseRecovery>)> {
+        match Self::open(path.clone()) {
+            Ok(database) => Ok((database, None)),
+            Err(error)
+                if path.is_file()
+                    && matches!(
+                        error.code,
+                        ErrorCode::DatabaseUnavailable | ErrorCode::DatabaseIntegrityFailed
+                    ) =>
+            {
+                let backup_path = quarantine_database(&path)?;
+                match Self::open(path) {
+                    Ok(database) => Ok((
+                        database,
+                        Some(DatabaseRecovery {
+                            backup_path,
+                            original_error: error.code,
+                        }),
+                    )),
+                    Err(retry_error) => Err(retry_error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn open(path: PathBuf) -> AppResult<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -46,9 +78,12 @@ impl Database {
     }
 
     fn conn(&self) -> AppResult<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|_| user_error("database connection was poisoned"))
+        self.conn.lock().map_err(|_| {
+            app_error(
+                ErrorCode::DatabaseUnavailable,
+                "The local media library connection failed and can be retried",
+            )
+        })
     }
 
     fn migrate(conn: &mut Connection) -> AppResult<()> {
@@ -378,7 +413,13 @@ impl Database {
             )
             .optional()?;
         match value {
-            Some(json) => Ok(serde_json::from_str(&json)?),
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(settings) => Ok(settings),
+                Err(_) => {
+                    conn.execute("DELETE FROM settings WHERE key = 'app_settings'", [])?;
+                    Ok(AppSettings::default())
+                }
+            },
             None => Ok(AppSettings::default()),
         }
     }
@@ -570,6 +611,33 @@ impl Database {
         transaction.commit()?;
         Ok(())
     }
+}
+
+fn quarantine_database(path: &std::path::Path) -> AppResult<PathBuf> {
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("reelspace.db");
+    let backup = path.with_file_name(format!(
+        "{filename}.corrupt-{timestamp}-{}",
+        std::process::id()
+    ));
+    std::fs::rename(path, &backup).map_err(|error| {
+        app_error(
+            ErrorCode::DatabaseIntegrityFailed,
+            "The damaged media library could not be quarantined",
+        )
+        .with_detail(error.to_string())
+    })?;
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+        if sidecar.exists() {
+            let backup_sidecar = PathBuf::from(format!("{}{suffix}", backup.display()));
+            let _ = std::fs::rename(sidecar, backup_sidecar);
+        }
+    }
+    Ok(backup)
 }
 
 fn probe_data_is_valid(data: &ProbeData) -> bool {
@@ -848,6 +916,81 @@ mod tests {
         assert_eq!(resumed.media_id, media.id);
         assert_eq!(resumed.attempts, 2);
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn corrupt_databases_are_quarantined_and_rebuilt() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("reelspace-db-recovery-{nonce}"));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("reelspace.db");
+        std::fs::write(&path, b"this is not sqlite").expect("corrupt fixture");
+
+        let (database, recovery) = Database::open_resilient(path.clone()).expect("self-heal");
+        let recovery = recovery.expect("recovery metadata");
+        assert!(recovery.backup_path.is_file());
+        assert_eq!(
+            std::fs::read(&recovery.backup_path).expect("backup"),
+            b"this is not sqlite"
+        );
+        assert_eq!(database.list_media(None).expect("fresh index").len(), 0);
+        drop(database);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn malformed_settings_are_reset_without_discarding_the_library() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-settings-repair-{nonce}.sqlite"));
+        let database = Database::open(path.clone()).expect("database");
+        database
+            .conn()
+            .expect("connection")
+            .execute(
+                "INSERT INTO settings (key, value) VALUES ('app_settings', '{broken')",
+                [],
+            )
+            .expect("bad settings fixture");
+        let media = item("C:\\captures\\preserved.mp4", MediaKind::Raw);
+        database.upsert_media(&media).expect("media");
+
+        let settings = database.load_settings().expect("settings self-heal");
+        assert!(settings.source_folders.is_empty());
+        assert_eq!(database.list_media(None).expect("preserved media").len(), 1);
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn newer_schema_versions_are_never_reset_automatically() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-newer-schema-{nonce}.sqlite"));
+        let connection = Connection::open(&path).expect("database");
+        connection
+            .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION + 1)
+            .expect("newer schema");
+        drop(connection);
+
+        let error = match Database::open_resilient(path.clone()) {
+            Ok(_) => panic!("must not downgrade"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::DatabaseMigrationFailed);
+        assert!(path.is_file());
+        assert!(std::fs::read_dir(path.parent().expect("parent"))
+            .expect("directory")
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains("corrupt-")));
         let _ = std::fs::remove_file(path);
     }
 }

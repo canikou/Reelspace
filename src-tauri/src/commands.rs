@@ -65,7 +65,13 @@ where
             }),
         );
         let started = Instant::now();
-        let result = task();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).unwrap_or_else(|_| {
+                Err(app_error(
+                    ErrorCode::Internal,
+                    "The media operation failed in isolation and can be retried",
+                ))
+            });
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &result {
             Ok(_) => telemetry.event(
@@ -182,6 +188,7 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
     let mut files_missing = 0;
     let mut traversal_errors = 0;
     let mut changed_path_keys = HashSet::new();
+    let mut failures_by_code = HashMap::<String, usize>::new();
     for folder in &settings.source_folders {
         let source_id = stable_id(folder);
         match media::scan_folder(
@@ -203,6 +210,9 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
                 files_skipped += result.files_skipped;
                 traversal_errors += result.traversal_errors;
                 changed_path_keys.extend(result.changed_path_keys);
+                for (code, count) in result.failures_by_code {
+                    *failures_by_code.entry(code).or_default() += count;
+                }
                 scanned.extend(result.items);
             }
             Err(error) if error.code == ErrorCode::SourceUnavailable => {
@@ -257,6 +267,7 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
             "probeCacheEntries": state.db.probe_cache_count()?,
             "queuedThumbnails": queued_thumbnails,
             "pendingThumbnailJobs": state.db.thumbnail_job_count()?,
+            "failuresByCode": failures_by_code,
             "elapsedMs": started.elapsed().as_millis() as u64,
         }),
     );
@@ -351,8 +362,20 @@ pub async fn get_audio_track_preview(
         move || {
             let started = Instant::now();
             if cancellation.load(Ordering::Acquire) {
-                return Err(user_error("audio preview cancelled"));
+                return Err(AppError::cancelled("Audio preview"));
             }
+            let fingerprint = media::FileFingerprint::read(&source)?;
+            let probe = match job_runtime.db.get_probe_cache(&fingerprint)? {
+                Some(probe) => probe,
+                None => {
+                    let probe = job_runtime
+                        .ffmpeg
+                        .probe_data_cancellable(&source, &cancellation)?;
+                    job_runtime.db.put_probe_cache(&fingerprint, &probe)?;
+                    probe
+                }
+            };
+            validate_audio_track_index(stream_index, &probe.audio_tracks)?;
             let output_lock = job_runtime.preview_coordinator.output_lock(&output);
             let output_guard = crate::jobs::lock_unpoisoned(&output_lock);
             let generated =
@@ -394,16 +417,18 @@ pub async fn get_audio_track_preview(
 }
 
 #[tauri::command]
-pub fn cancel_audio_preview_session(state: State<'_, AppState>, session_id: String) {
-    if validate_session_id(&session_id).is_err() {
-        return;
-    }
+pub fn cancel_audio_preview_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> AppResult<()> {
+    validate_session_id(&session_id)?;
     let cancelled = state.preview_coordinator.cancel_session(&session_id);
     state.telemetry.event(
         "info",
         "audio.preview.session_cancel",
         json!({ "sessionId": session_id, "active": cancelled }),
     );
+    Ok(())
 }
 
 #[tauri::command]
@@ -412,17 +437,7 @@ pub fn log_client_event(
     event: String,
     mut fields: Value,
 ) -> AppResult<()> {
-    let valid = !event.is_empty()
-        && event.len() <= 80
-        && event
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character));
-    if !valid {
-        return Err(user_error("telemetry event name is invalid"));
-    }
-    if !fields.is_object() || serde_json::to_vec(&fields)?.len() > 16 * 1024 {
-        return Err(user_error("telemetry fields are invalid"));
-    }
+    validate_client_event(&event, &fields)?;
     if let Some(fields) = fields.as_object_mut() {
         fields.insert("origin".to_string(), json!("client"));
     }
@@ -450,17 +465,7 @@ pub fn update_media_tags(
     tags: Vec<String>,
 ) -> AppResult<MediaItem> {
     validate_id(&id, "media")?;
-    if tags.len() > 64 {
-        return Err(user_error("a media item cannot have more than 64 tags"));
-    }
-    let normalized = tags
-        .into_iter()
-        .map(|tag| tag.trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .collect::<Vec<_>>();
-    if normalized.iter().any(|tag| tag.chars().count() > 64) {
-        return Err(user_error("tags cannot be longer than 64 characters"));
-    }
+    let normalized = normalize_tags(tags)?;
     state.db.update_tags(&id, &normalized)?;
     state.db.get_media(&id)
 }
@@ -472,14 +477,8 @@ pub fn update_media_notes(
     notes: Option<String>,
 ) -> AppResult<MediaItem> {
     validate_id(&id, "media")?;
-    if notes.as_ref().is_some_and(|value| value.len() > 64 * 1024) {
-        return Err(user_error("notes cannot be larger than 64 KB"));
-    }
-    let cleaned = notes
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    state.db.update_notes(&id, cleaned)?;
+    let cleaned = normalize_notes(notes)?;
+    state.db.update_notes(&id, cleaned.as_deref())?;
     state.db.get_media(&id)
 }
 
@@ -499,13 +498,7 @@ pub fn list_collection_media(
 
 #[tauri::command]
 pub fn create_collection(state: State<'_, AppState>, name: String) -> AppResult<Vec<Collection>> {
-    let cleaned = name.trim();
-    if cleaned.is_empty() {
-        return Err(user_error("collection name cannot be empty"));
-    }
-    if cleaned.chars().count() > 120 {
-        return Err(user_error("collection name cannot exceed 120 characters"));
-    }
+    let cleaned = normalize_collection_name(&name)?;
     state
         .db
         .create_collection(&stable_id(cleaned), cleaned, Utc::now().timestamp())?;
@@ -546,18 +539,12 @@ pub async fn create_clip(
     .await
 }
 
-fn create_clip_inner(state: &AppState, request: CreateClipRequest) -> AppResult<MediaItem> {
+fn create_clip_inner(state: &AppState, mut request: CreateClipRequest) -> AppResult<MediaItem> {
     validate_id(&request.source_id, "media")?;
     if let Some(session_id) = request.session_id.as_deref() {
         validate_session_id(session_id)?;
     }
-    if request
-        .title
-        .as_ref()
-        .is_some_and(|title| title.chars().count() > 120)
-    {
-        return Err(user_error("clip title cannot exceed 120 characters"));
-    }
+    request.title = normalize_clip_title(request.title)?;
     if request
         .enabled_audio_track_indices
         .as_ref()
@@ -709,7 +696,13 @@ fn validated_raw_deletion_path(item: &MediaItem, settings: &AppSettings) -> AppR
 }
 
 fn validate_trim_range(start: f64, end: f64, duration: f64) -> AppResult<()> {
-    if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+    if !start.is_finite()
+        || !end.is_finite()
+        || !duration.is_finite()
+        || duration <= 0.0
+        || start < 0.0
+        || end <= start
+    {
         return Err(user_error("trim range is invalid"));
     }
     if duration > 0.0 && end > duration + 0.05 {
@@ -738,11 +731,9 @@ fn validate_settings(settings: &AppSettings) -> AppResult<()> {
     if settings.storage_limit_bytes == Some(0) {
         return Err(user_error("storage limit must be greater than zero"));
     }
-    if settings
-        .source_folders
-        .iter()
-        .any(|value| value.trim().is_empty())
-    {
+    if settings.source_folders.iter().any(|value| {
+        value.trim().is_empty() || value != value.trim() || contains_forbidden_control(value, false)
+    }) {
         return Err(user_error("source folders cannot contain an empty path"));
     }
     if settings.source_folders.len() > 64 {
@@ -757,20 +748,35 @@ fn validate_settings(settings: &AppSettings) -> AppResult<()> {
         .chain(settings.working_folder.as_deref())
         .chain(settings.clip_folder.as_deref())
     {
-        if path.len() > 32_767 || !Path::new(path).is_absolute() {
+        let lower = path.to_ascii_lowercase();
+        if path.trim().is_empty()
+            || path != path.trim()
+            || path.len() > 32_767
+            || contains_forbidden_control(path, false)
+            || lower.starts_with("\\\\.\\")
+            || lower.starts_with("\\\\?\\globalroot")
+            || !Path::new(path).is_absolute()
+        {
             return Err(app_error(
                 ErrorCode::InvalidPath,
                 "Configured folders must use absolute Windows paths",
             ));
         }
     }
+    let mut unique_sources = HashSet::new();
+    if settings
+        .source_folders
+        .iter()
+        .any(|source| !unique_sources.insert(media::normalized_path_key(Path::new(source))))
+    {
+        return Err(user_error("source folders cannot contain duplicates"));
+    }
     let outputs = output_roots(settings);
     for source in &settings.source_folders {
         let source_path = Path::new(source);
-        if outputs
-            .iter()
-            .any(|output| path_is_within(output, source_path))
-        {
+        if outputs.iter().any(|output| {
+            path_is_within(output, source_path) || path_is_within(source_path, output)
+        }) {
             return Err(user_error(
                 "clip output cannot be inside a source folder; choose a separate clip or working folder",
             ));
@@ -880,14 +886,23 @@ fn run_thumbnail_worker(state: &AppState) -> AppResult<()> {
             state.db.queue_thumbnail_job(&item, &fingerprint, 100)?;
             continue;
         }
-        match media::ensure_thumbnail(
-            &job.media_id,
-            &source,
-            job.duration_seconds,
-            &state.ffmpeg,
-            &state.thumbnail_dir,
-            Some(state.thumbnail_scheduler.cancelled()),
-        ) {
+        let thumbnail_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            media::ensure_thumbnail(
+                &job.media_id,
+                &source,
+                job.duration_seconds,
+                &state.ffmpeg,
+                &state.thumbnail_dir,
+                Some(state.thumbnail_scheduler.cancelled()),
+            )
+        }))
+        .unwrap_or_else(|_| {
+            Err(app_error(
+                ErrorCode::Internal,
+                "Thumbnail generation failed in isolation and will be retried",
+            ))
+        });
+        match thumbnail_result {
             Ok(Some(thumbnail)) => {
                 state
                     .db
@@ -1059,7 +1074,11 @@ fn stable_id(value: &str) -> String {
 }
 
 fn validate_id(id: &str, kind: &str) -> AppResult<()> {
-    if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if id.len() == 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         Ok(())
     } else {
         Err(user_error(format!("{kind} identifier is invalid")))
@@ -1070,6 +1089,15 @@ fn validate_session_id(session_id: &str) -> AppResult<()> {
     let valid = !session_id.is_empty()
         && session_id.len() <= 128
         && session_id
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && session_id
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && !session_id.contains("..")
+        && session_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
     if valid {
@@ -1077,6 +1105,111 @@ fn validate_session_id(session_id: &str) -> AppResult<()> {
     } else {
         Err(user_error("media session identifier is invalid"))
     }
+}
+
+fn normalize_tags(tags: Vec<String>) -> AppResult<Vec<String>> {
+    if tags.len() > 64 {
+        return Err(user_error("a media item cannot have more than 64 tags"));
+    }
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if tag.chars().count() > 64 {
+            return Err(user_error("tags cannot be longer than 64 characters"));
+        }
+        if contains_forbidden_control(tag, false) {
+            return Err(user_error("tags contain unsupported control characters"));
+        }
+        if seen.insert(tag.to_lowercase()) {
+            normalized.push(tag.to_string());
+        }
+    }
+    if normalized.iter().map(String::len).sum::<usize>() > 4096 {
+        return Err(user_error("the combined tag data is too large"));
+    }
+    Ok(normalized)
+}
+
+fn normalize_notes(notes: Option<String>) -> AppResult<Option<String>> {
+    let Some(notes) = notes else {
+        return Ok(None);
+    };
+    if notes.len() > 64 * 1024 {
+        return Err(user_error("notes cannot be larger than 64 KB"));
+    }
+    if contains_forbidden_control(&notes, true) {
+        return Err(user_error("notes contain unsupported control characters"));
+    }
+    Ok(match notes.trim() {
+        "" => None,
+        cleaned => Some(cleaned.to_string()),
+    })
+}
+
+fn normalize_collection_name(name: &str) -> AppResult<&str> {
+    let cleaned = name.trim();
+    if cleaned.is_empty() {
+        return Err(user_error("collection name cannot be empty"));
+    }
+    if cleaned.chars().count() > 120 {
+        return Err(user_error("collection name cannot exceed 120 characters"));
+    }
+    if contains_forbidden_control(cleaned, false) {
+        return Err(user_error(
+            "collection name contains unsupported control characters",
+        ));
+    }
+    Ok(cleaned)
+}
+
+fn normalize_clip_title(title: Option<String>) -> AppResult<Option<String>> {
+    let Some(title) = title else {
+        return Ok(None);
+    };
+    let cleaned = title.trim();
+    if cleaned.chars().count() > 120 {
+        return Err(user_error("clip title cannot exceed 120 characters"));
+    }
+    if contains_forbidden_control(cleaned, false) {
+        return Err(user_error(
+            "clip title contains unsupported control characters",
+        ));
+    }
+    Ok((!cleaned.is_empty()).then(|| cleaned.to_string()))
+}
+
+fn validate_audio_track_index(stream_index: u32, tracks: &[AudioTrack]) -> AppResult<()> {
+    if tracks.iter().any(|track| track.index == stream_index) {
+        Ok(())
+    } else {
+        Err(user_error("the selected audio track is invalid"))
+    }
+}
+
+fn validate_client_event(event: &str, fields: &Value) -> AppResult<()> {
+    let valid = !event.is_empty()
+        && event.len() <= 80
+        && event
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character));
+    if !valid {
+        return Err(user_error("telemetry event name is invalid"));
+    }
+    if !fields.is_object() || serde_json::to_vec(fields)?.len() > 16 * 1024 {
+        return Err(user_error("telemetry fields are invalid"));
+    }
+    Ok(())
+}
+
+fn contains_forbidden_control(value: &str, allow_layout_whitespace: bool) -> bool {
+    value.chars().any(|character| {
+        character.is_control()
+            && !(allow_layout_whitespace && matches!(character, '\n' | '\r' | '\t'))
+    })
 }
 
 #[cfg(test)]
@@ -1109,17 +1242,137 @@ mod tests {
     #[test]
     fn ipc_identifiers_have_a_bounded_stable_format() {
         assert!(validate_id(&"a".repeat(64), "media").is_ok());
+        assert!(validate_id(&"A".repeat(64), "media").is_err());
+        assert!(validate_id(&"a".repeat(63), "media").is_err());
+        assert!(validate_id(&format!("{}g", "a".repeat(63)), "media").is_err());
         assert!(validate_id("../media", "media").is_err());
         assert!(validate_session_id("trim-session:42").is_ok());
         assert!(validate_session_id("bad/session").is_err());
+        assert!(validate_session_id(".hidden").is_err());
+        assert!(validate_session_id("trailing-").is_err());
+        assert!(validate_session_id("bad..session").is_err());
+        assert!(validate_session_id(&"a".repeat(129)).is_err());
     }
 
     #[test]
     fn invalid_trim_ranges_are_rejected() {
         assert!(validate_trim_range(f64::NAN, 2.0, 10.0).is_err());
+        assert!(validate_trim_range(0.0, f64::INFINITY, 10.0).is_err());
+        assert!(validate_trim_range(0.0, 1.0, f64::NAN).is_err());
+        assert!(validate_trim_range(0.0, 1.0, 0.0).is_err());
+        assert!(validate_trim_range(-0.001, 1.0, 10.0).is_err());
         assert!(validate_trim_range(2.0, 2.0, 10.0).is_err());
         assert!(validate_trim_range(0.0, 11.0, 10.0).is_err());
         assert!(validate_trim_range(1.0, 2.0, 10.0).is_ok());
+    }
+
+    #[test]
+    fn tags_are_bounded_clean_and_case_insensitively_deduplicated() {
+        assert_eq!(
+            normalize_tags(vec![" Game ".into(), "game".into(), "Ranked".into()])
+                .expect("valid tags"),
+            vec!["Game", "Ranked"]
+        );
+        assert!(normalize_tags(vec!["x".repeat(65)]).is_err());
+        assert!(normalize_tags(vec!["bad\0tag".into()]).is_err());
+        assert!(normalize_tags((0..65).map(|index| index.to_string()).collect()).is_err());
+        let wide = (0..64)
+            .map(|index| format!("{index:02}{}", "\u{1f3ae}".repeat(62)))
+            .collect();
+        assert!(normalize_tags(wide).is_err());
+    }
+
+    #[test]
+    fn settings_reject_ambiguous_duplicate_and_overlapping_paths() {
+        let duplicate = AppSettings {
+            source_folders: vec!["C:\\captures".into(), "c:\\captures\\".into()],
+            ..AppSettings::default()
+        };
+        assert!(validate_settings(&duplicate).is_err());
+        let source_inside_output = AppSettings {
+            source_folders: vec!["C:\\managed\\raw".into()],
+            clip_folder: Some("C:\\managed".into()),
+            ..AppSettings::default()
+        };
+        assert!(validate_settings(&source_inside_output).is_err());
+        let device_path = AppSettings {
+            source_folders: vec!["\\\\.\\PhysicalDrive0".into()],
+            ..AppSettings::default()
+        };
+        assert!(validate_settings(&device_path).is_err());
+    }
+
+    #[test]
+    fn settings_enforce_all_numeric_and_count_boundaries() {
+        for invalid in [0, 49, 100, u8::MAX] {
+            let settings = AppSettings {
+                cleanup_threshold_percent: invalid,
+                ..AppSettings::default()
+            };
+            assert!(validate_settings(&settings).is_err());
+        }
+        for valid in [50, 99] {
+            let settings = AppSettings {
+                cleanup_threshold_percent: valid,
+                storage_limit_bytes: Some(1),
+                ..AppSettings::default()
+            };
+            assert!(validate_settings(&settings).is_ok());
+        }
+        let zero_limit = AppSettings {
+            storage_limit_bytes: Some(0),
+            ..AppSettings::default()
+        };
+        assert!(validate_settings(&zero_limit).is_err());
+        let too_many = AppSettings {
+            source_folders: (0..65).map(|index| format!("C:\\source-{index}")).collect(),
+            ..AppSettings::default()
+        };
+        assert!(validate_settings(&too_many).is_err());
+    }
+
+    #[test]
+    fn user_text_is_trimmed_bounded_and_control_safe() {
+        assert_eq!(
+            normalize_notes(Some("  note\ntext  ".into())).unwrap(),
+            Some("note\ntext".into())
+        );
+        assert_eq!(normalize_notes(Some("  ".into())).unwrap(), None);
+        assert!(normalize_notes(Some("bad\0note".into())).is_err());
+        assert!(normalize_notes(Some("x".repeat(64 * 1024 + 1))).is_err());
+        assert_eq!(
+            normalize_collection_name("  Favorites  ").unwrap(),
+            "Favorites"
+        );
+        assert!(normalize_collection_name("\n").is_err());
+        assert!(normalize_collection_name(&"x".repeat(121)).is_err());
+        assert_eq!(
+            normalize_clip_title(Some("  highlight  ".into())).unwrap(),
+            Some("highlight".into())
+        );
+        assert_eq!(normalize_clip_title(Some("  ".into())).unwrap(), None);
+        assert!(normalize_clip_title(Some("bad\0title".into())).is_err());
+    }
+
+    #[test]
+    fn audio_streams_and_client_telemetry_are_strictly_validated() {
+        let tracks = vec![AudioTrack {
+            index: 2,
+            codec: None,
+            channels: Some(2),
+            language: None,
+            title: None,
+            is_default: true,
+        }];
+        assert!(validate_audio_track_index(2, &tracks).is_ok());
+        assert!(validate_audio_track_index(0, &tracks).is_err());
+        assert!(validate_audio_track_index(u32::MAX, &tracks).is_err());
+        assert!(validate_client_event("ui.render.failed", &json!({ "count": 1 })).is_ok());
+        assert!(validate_client_event("", &json!({})).is_err());
+        assert!(validate_client_event("bad/event", &json!({})).is_err());
+        assert!(validate_client_event(&"a".repeat(81), &json!({})).is_err());
+        assert!(validate_client_event("valid", &json!([])).is_err());
+        assert!(validate_client_event("valid", &json!({ "data": "x".repeat(16 * 1024) })).is_err());
     }
 
     #[test]

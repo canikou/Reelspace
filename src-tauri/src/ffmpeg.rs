@@ -50,6 +50,27 @@ impl TrimMethod {
 }
 
 impl Ffmpeg {
+    /// Creates a tool runner from explicit executable paths. This is used by
+    /// diagnostics and benchmark harnesses that run without a Tauri app handle.
+    pub fn from_paths(ffmpeg_path: PathBuf, ffprobe_path: PathBuf) -> AppResult<Self> {
+        if !ffmpeg_path.is_file() {
+            return Err(app_error(
+                ErrorCode::FfmpegUnavailable,
+                "The configured FFmpeg executable was not found",
+            ));
+        }
+        if !ffprobe_path.is_file() {
+            return Err(app_error(
+                ErrorCode::FfprobeUnavailable,
+                "The configured FFprobe executable was not found",
+            ));
+        }
+        Ok(Self {
+            ffmpeg_path: Some(ffmpeg_path),
+            ffprobe_path: Some(ffprobe_path),
+        })
+    }
+
     pub fn discover(app: &AppHandle) -> Self {
         let bundled_ffmpeg = app
             .path()

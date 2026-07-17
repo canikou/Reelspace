@@ -254,6 +254,10 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-solid); o
 .setup-body { display: flex; justify-content: flex-end; gap: 8px; padding: 14px; }
 
 .spin { animation: spin 850ms linear infinite; }
+.recovery-screen { display: grid; min-height: 100vh; place-items: center; padding: 32px; background: var(--canvas); }
+.recovery-screen > div { display: grid; gap: 14px; width: min(560px, 100%); padding: 28px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 24px 80px rgb(0 0 0 / 58%); }
+.recovery-screen p { color: var(--muted); line-height: 1.6; }
+.recovery-screen button { justify-self: start; padding: 10px 16px; border-radius: var(--radius-sm); color: #0c0812; background: var(--accent); font-weight: 800; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 

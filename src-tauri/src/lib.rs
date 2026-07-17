@@ -1,11 +1,12 @@
 mod commands;
-mod db;
-mod error;
+pub mod db;
+pub mod error;
 mod explorer;
-mod ffmpeg;
+pub mod ffmpeg;
 mod jobs;
-mod media;
-mod models;
+pub mod media;
+pub mod models;
+mod recovery;
 mod state;
 mod storage;
 mod telemetry;
@@ -14,8 +15,8 @@ use commands::*;
 use state::AppState;
 use tauri::Manager;
 
-pub fn run() {
-    let app = tauri::Builder::default()
+pub fn run() -> error::AppResult<()> {
+    let built = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = AppState::new(app.handle())?;
@@ -56,8 +57,14 @@ pub fn run() {
             get_cleanup_candidates,
             delete_raw_file
         ])
-        .build(tauri::generate_context!())
-        .expect("failed to build Reelspace");
+        .build(tauri::generate_context!());
+    let app = match built {
+        Ok(app) => app,
+        Err(error) => {
+            recovery::record_startup_failure(&error.to_string());
+            return Err(error.into());
+        }
+    };
     app.run(|app_handle, event| {
         if matches!(
             event,
@@ -67,6 +74,8 @@ pub fn run() {
                 .state::<AppState>()
                 .thumbnail_scheduler
                 .request_shutdown();
+            app_handle.state::<AppState>().recovery.finish();
         }
     });
+    Ok(())
 }
