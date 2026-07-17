@@ -122,11 +122,35 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
 #[tauri::command]
 pub async fn scan_sources(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
     let runtime = state.inner().clone();
+    if runtime
+        .scan_in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        runtime
+            .scan_coalesced_events
+            .fetch_add(1, Ordering::Relaxed);
+        runtime.telemetry.event(
+            "info",
+            "library.scan.coalesced",
+            json!({ "reason": "scan_in_flight" }),
+        );
+        return runtime.db.list_media(Some(MediaKind::Raw));
+    }
+    let _scan_guard = ScanInFlightGuard(Arc::clone(&runtime.scan_in_flight));
     let job_runtime = runtime.clone();
     run_media_job(&runtime, "library_scan", json!({}), None, move || {
         scan_sources_inner(&job_runtime)
     })
     .await
+}
+
+struct ScanInFlightGuard(Arc<AtomicBool>);
+
+impl Drop for ScanInFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
@@ -154,6 +178,7 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
     let mut cached_probe_hits = 0;
     let mut files_skipped = 0;
     let mut files_missing = 0;
+    let mut traversal_errors = 0;
     for folder in &settings.source_folders {
         let source_id = stable_id(folder);
         match media::scan_folder(
@@ -165,12 +190,15 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
             &excluded_roots,
         ) {
             Ok(result) => {
-                reachable_sources.push(PathBuf::from(folder));
+                if result.traversal_errors == 0 {
+                    reachable_sources.push(PathBuf::from(folder));
+                }
                 files_visited += result.files_visited;
                 files_changed += result.files_changed;
                 files_reprobed += result.files_reprobed;
                 cached_probe_hits += result.cached_probe_hits;
                 files_skipped += result.files_skipped;
+                traversal_errors += result.traversal_errors;
                 scanned.extend(result.items);
             }
             Err(error) if error.code == ErrorCode::SourceUnavailable => {
@@ -235,6 +263,8 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
             "filesReprobed": files_reprobed,
             "cachedProbeHits": cached_probe_hits,
             "filesSkipped": files_skipped,
+            "traversalErrors": traversal_errors,
+            "coalescedEvents": state.scan_coalesced_events.swap(0, Ordering::AcqRel),
             "probeCacheEntries": state.db.probe_cache_count()?,
             "repairedThumbnails": repaired,
             "thumbnailFailures": failures.len(),

@@ -418,8 +418,19 @@ impl Database {
     }
 
     pub fn delete_media(&self, id: &str) -> AppResult<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM media WHERE id = ?1", [id])?;
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let path: Option<String> = transaction
+            .query_row("SELECT path FROM media WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        transaction.execute("DELETE FROM media WHERE id = ?1", [id])?;
+        if let Some(path) = path {
+            let key = crate::media::normalized_path_key(std::path::Path::new(&path));
+            transaction.execute("DELETE FROM probe_cache WHERE path_key = ?1", [key])?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 }
@@ -600,6 +611,29 @@ mod tests {
             1
         );
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn deleting_media_removes_only_its_disposable_probe_cache() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-delete-cache-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        let media = item("C:\\captures\\delete.mp4", MediaKind::Raw);
+        db.upsert_media(&media).expect("media");
+        let fingerprint = FileFingerprint {
+            path_key: crate::media::normalized_path_key(std::path::Path::new(&media.path)),
+            size: media.file_size,
+            modified_ns: 2,
+        };
+        db.put_probe_cache(&fingerprint, &probe_data(10.0))
+            .expect("cache");
+        db.delete_media(&media.id).expect("delete");
+        assert_eq!(db.probe_cache_count().expect("cache count"), 0);
+        drop(db);
         let _ = std::fs::remove_file(path);
     }
 }

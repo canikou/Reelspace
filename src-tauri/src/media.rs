@@ -9,6 +9,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "avi", "webm", "m4v"];
@@ -20,6 +21,7 @@ pub struct ScanFolderResult {
     pub cached_probe_hits: usize,
     pub files_reprobed: usize,
     pub files_skipped: usize,
+    pub traversal_errors: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +64,23 @@ impl FileFingerprint {
     pub fn token(&self) -> String {
         format!("{}:{}:{}", self.path_key, self.size, self.modified_ns)
     }
+
+    pub fn read_stable(path: &Path, minimum_age: Duration) -> AppResult<Self> {
+        let fingerprint = Self::read(path)?;
+        let metadata = path.metadata()?;
+        let is_recent = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age < minimum_age);
+        if is_recent {
+            return Err(app_error(
+                ErrorCode::FileChanged,
+                "A recording is still being written and will be retried later",
+            ));
+        }
+        Ok(fingerprint)
+    }
 }
 
 pub fn scan_folder(
@@ -72,7 +91,7 @@ pub fn scan_folder(
     existing: &HashMap<String, MediaItem>,
     excluded_roots: &[PathBuf],
 ) -> AppResult<ScanFolderResult> {
-    if !folder.exists() {
+    if !folder.is_dir() {
         return Err(app_error(
             ErrorCode::SourceUnavailable,
             "A configured source folder is unavailable",
@@ -80,17 +99,25 @@ pub fn scan_folder(
         .with_detail(folder.display().to_string()));
     }
 
-    let files = WalkDir::new(folder)
+    let mut files = Vec::new();
+    let mut files_visited = 0;
+    let mut traversal_errors = 0;
+    for entry in WalkDir::new(folder)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| !is_excluded(entry.path(), excluded_roots))
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .filter(|path| is_video_file(path))
-        .collect::<Vec<_>>();
+    {
+        match entry {
+            Ok(entry) => {
+                files_visited += 1;
+                if entry.file_type().is_file() && is_video_file(entry.path()) {
+                    files.push(entry.into_path());
+                }
+            }
+            Err(_) => traversal_errors += 1,
+        }
+    }
 
-    let files_visited = files.len();
     let mut result = ScanFolderResult {
         items: Vec::with_capacity(files.len()),
         files_visited,
@@ -98,14 +125,20 @@ pub fn scan_folder(
         cached_probe_hits: 0,
         files_reprobed: 0,
         files_skipped: 0,
+        traversal_errors,
     };
     for path in files {
         let key = normalized_path_key(&path);
         if let Some(item) = existing.get(&key) {
             if file_is_unchanged(&path, item) {
-                result.cached_probe_hits += 1;
-                result.items.push(item.clone());
-                continue;
+                if let Ok(fingerprint) = FileFingerprint::read_stable(&path, Duration::from_secs(3))
+                {
+                    if database.get_probe_cache(&fingerprint)?.is_some() {
+                        result.cached_probe_hits += 1;
+                        result.items.push(item.clone());
+                        continue;
+                    }
+                }
             }
         }
         match build_raw_item(&path, ffmpeg, database, thumbnail_dir) {
@@ -276,7 +309,7 @@ fn build_raw_item(
     // This function is only reached for new or changed sources. A stable path
     // ID must not make a replacement file reuse the previous frame forever.
     let _ = std::fs::remove_file(thumbnail_dir.join(format!("{}.jpg", stable_id(path))));
-    let fingerprint = FileFingerprint::read(path)?;
+    let fingerprint = FileFingerprint::read_stable(path, Duration::from_secs(3))?;
     let (probed, cache_hit) = match database.get_probe_cache(&fingerprint)? {
         Some(probed) => (probed, true),
         None => {
@@ -539,4 +572,20 @@ mod tests {
             .to_string_lossy()
             .ends_with(".reelspace-part.mp4"));
     }
+
+    #[test]
+    fn recently_modified_recordings_are_deferred() {
+        let path = std::env::temp_dir().join(format!(
+            "reelspace-growing-{}-{}.mp4",
+            std::process::id(),
+            TEMP_SEQUENCE_FOR_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, [1_u8, 2, 3]).expect("fixture");
+        let error = FileFingerprint::read_stable(&path, Duration::from_secs(3))
+            .expect_err("fresh file must be deferred");
+        assert_eq!(error.code, ErrorCode::FileChanged);
+        let _ = std::fs::remove_file(path);
+    }
+
+    static TEMP_SEQUENCE_FOR_TEST: AtomicU64 = AtomicU64::new(1);
 }

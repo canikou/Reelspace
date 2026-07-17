@@ -6,6 +6,7 @@ use crate::telemetry::Telemetry;
 use directories::ProjectDirs;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 
@@ -17,6 +18,8 @@ pub struct AppState {
     pub thumbnail_dir: PathBuf,
     pub audio_preview_dir: PathBuf,
     pub media_index_lock: Arc<Mutex<()>>,
+    pub scan_in_flight: Arc<AtomicBool>,
+    pub scan_coalesced_events: Arc<AtomicU64>,
     pub audio_cache_cleanup_lock: Arc<Mutex<()>>,
     pub background_jobs: Arc<MediaJobQueue>,
     pub media_jobs: Arc<MediaJobQueue>,
@@ -45,6 +48,8 @@ impl AppState {
             thumbnail_dir,
             audio_preview_dir,
             media_index_lock: Arc::new(Mutex::new(())),
+            scan_in_flight: Arc::new(AtomicBool::new(false)),
+            scan_coalesced_events: Arc::new(AtomicU64::new(0)),
             audio_cache_cleanup_lock: Arc::new(Mutex::new(())),
             background_jobs: Arc::new(MediaJobQueue::new(1)),
             media_jobs: Arc::new(MediaJobQueue::new(1)),
