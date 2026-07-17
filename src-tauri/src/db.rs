@@ -114,8 +114,14 @@ impl Database {
               modified_at, trim_start_seconds, trim_end_seconds
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             ON CONFLICT(path) DO UPDATE SET
-              kind = excluded.kind,
-              source_path = excluded.source_path,
+              kind = CASE
+                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.kind
+                ELSE excluded.kind
+              END,
+              source_path = CASE
+                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.source_path
+                ELSE excluded.source_path
+              END,
               filename = excluded.filename,
               file_size = excluded.file_size,
               duration_seconds = excluded.duration_seconds,
@@ -124,9 +130,19 @@ impl Database {
               codec = excluded.codec,
               tags_json = CASE WHEN media.tags_json = '[]' THEN excluded.tags_json ELSE media.tags_json END,
               thumbnail_path = COALESCE(excluded.thumbnail_path, media.thumbnail_path),
+              notes = CASE
+                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.notes
+                ELSE excluded.notes
+              END,
               modified_at = excluded.modified_at,
-              trim_start_seconds = excluded.trim_start_seconds,
-              trim_end_seconds = excluded.trim_end_seconds
+              trim_start_seconds = CASE
+                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.trim_start_seconds
+                ELSE excluded.trim_start_seconds
+              END,
+              trim_end_seconds = CASE
+                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.trim_end_seconds
+                ELSE excluded.trim_end_seconds
+              END
             "#,
             params![
                 item.id,
@@ -220,6 +236,21 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn list_collection_media(&self, collection_id: &str) -> AppResult<Vec<MediaItem>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT m.*
+            FROM media m
+            INNER JOIN collection_items ci ON ci.media_id = m.id
+            WHERE ci.collection_id = ?1
+            ORDER BY ci.added_at DESC
+            "#,
+        )?;
+        let rows = stmt.query_map([collection_id], row_to_media)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn create_collection(&self, id: &str, name: &str, created_at: i64) -> AppResult<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -271,4 +302,59 @@ fn row_to_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
         trim_start_seconds: row.get("trim_start_seconds")?,
         trim_end_seconds: row.get("trim_end_seconds")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn item(path: &str, kind: MediaKind) -> MediaItem {
+        MediaItem {
+            id: format!("{kind:?}-{path}"),
+            kind,
+            path: path.to_string(),
+            source_path: (kind == MediaKind::Clip).then(|| "source.mp4".to_string()),
+            filename: "video.mp4".to_string(),
+            file_size: 42,
+            duration_seconds: 10.0,
+            width: Some(1920),
+            height: Some(1080),
+            codec: Some("h264".to_string()),
+            tags: vec!["test".to_string()],
+            notes: (kind == MediaKind::Clip).then(|| "clip title".to_string()),
+            thumbnail_path: None,
+            created_at: 1,
+            modified_at: 2,
+            trim_start_seconds: (kind == MediaKind::Clip).then_some(1.0),
+            trim_end_seconds: (kind == MediaKind::Clip).then_some(5.0),
+        }
+    }
+
+    #[test]
+    fn scanner_upsert_cannot_downgrade_a_clip() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-db-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        db.upsert_media(&item("C:\\clips\\protected.mp4", MediaKind::Clip))
+            .expect("insert clip");
+        db.upsert_media(&item("C:\\clips\\protected.mp4", MediaKind::Raw))
+            .expect("scanner upsert");
+
+        let stored = db
+            .list_media(Some(MediaKind::Clip))
+            .expect("list clips")
+            .pop()
+            .expect("protected clip");
+        assert_eq!(stored.kind, MediaKind::Clip);
+        assert_eq!(stored.source_path.as_deref(), Some("source.mp4"));
+        assert_eq!(stored.notes.as_deref(), Some("clip title"));
+        assert_eq!(stored.trim_start_seconds, Some(1.0));
+
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
 }

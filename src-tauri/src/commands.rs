@@ -8,6 +8,7 @@ use crate::state::AppState;
 use crate::storage;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -25,6 +26,7 @@ pub fn get_app_state(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
 
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppResult<AppSnapshot> {
+    validate_settings(&settings)?;
     state.db.save_settings(&settings)?;
     get_app_state(state)
 }
@@ -32,10 +34,46 @@ pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppRe
 #[tauri::command]
 pub fn scan_sources(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
     let settings = state.db.load_settings()?;
+    let existing_items = state.db.list_media(Some(MediaKind::Raw))?;
+    let existing = existing_items
+        .iter()
+        .cloned()
+        .map(|item| (media::normalized_path_key(Path::new(&item.path)), item))
+        .collect::<HashMap<_, _>>();
+    let excluded_roots = output_roots(&settings);
+    let mut scanned = Vec::new();
     for folder in &settings.source_folders {
-        let items = media::scan_folder(Path::new(folder), &state.ffmpeg, &state.thumbnail_dir)?;
-        for item in items {
-            state.db.upsert_media(&item)?;
+        scanned.extend(media::scan_folder(
+            Path::new(folder),
+            &state.ffmpeg,
+            &state.thumbnail_dir,
+            &existing,
+            &excluded_roots,
+        )?);
+    }
+    let seen = scanned
+        .iter()
+        .map(|item| media::normalized_path_key(Path::new(&item.path)))
+        .collect::<HashSet<_>>();
+    for item in &scanned {
+        let key = media::normalized_path_key(Path::new(&item.path));
+        let unchanged = existing
+            .get(&key)
+            .map(|current| {
+                current.file_size == item.file_size && current.modified_at == item.modified_at
+            })
+            .unwrap_or(false);
+        if !unchanged {
+            state.db.upsert_media(item)?;
+        }
+    }
+    for item in existing_items {
+        let path = Path::new(&item.path);
+        if belongs_to_sources(path, &settings.source_folders)
+            && !belongs_to_roots(path, &excluded_roots)
+            && !seen.contains(&media::normalized_path_key(path))
+        {
+            state.db.delete_media(&item.id)?;
         }
     }
     repair_missing_thumbnails(&state)?;
@@ -85,6 +123,14 @@ pub fn list_collections(state: State<'_, AppState>) -> AppResult<Vec<Collection>
 }
 
 #[tauri::command]
+pub fn list_collection_media(
+    state: State<'_, AppState>,
+    collection_id: String,
+) -> AppResult<Vec<MediaItem>> {
+    state.db.list_collection_media(&collection_id)
+}
+
+#[tauri::command]
 pub fn create_collection(state: State<'_, AppState>, name: String) -> AppResult<Vec<Collection>> {
     let cleaned = name.trim();
     if cleaned.is_empty() {
@@ -115,6 +161,19 @@ pub fn create_clip(state: State<'_, AppState>, request: CreateClipRequest) -> Ap
     if source.kind != MediaKind::Raw {
         return Err(user_error("clips must be created from raw media"));
     }
+    if !request.start_seconds.is_finite()
+        || !request.end_seconds.is_finite()
+        || request.start_seconds < 0.0
+        || request.end_seconds <= request.start_seconds
+    {
+        return Err(user_error("trim range is invalid"));
+    }
+    if source.duration_seconds > 0.0 && request.end_seconds > source.duration_seconds + 0.05 {
+        return Err(user_error("trim end exceeds the source duration"));
+    }
+    if !Path::new(&source.path).is_file() {
+        return Err(user_error("source file is no longer available"));
+    }
     let clip_dir = resolve_clip_dir(&settings, &state.data_dir)?;
     let output_path = media::clip_output_path(&clip_dir, &request, &source);
     let item = media::build_clip_item(
@@ -124,7 +183,13 @@ pub fn create_clip(state: State<'_, AppState>, request: CreateClipRequest) -> Ap
         &state.ffmpeg,
         &state.thumbnail_dir,
     )?;
-    state.db.upsert_media(&item)?;
+    if let Err(error) = state.db.upsert_media(&item) {
+        let _ = std::fs::remove_file(&item.path);
+        if let Some(thumbnail) = &item.thumbnail_path {
+            let _ = std::fs::remove_file(thumbnail);
+        }
+        return Err(error);
+    }
     Ok(item)
 }
 
@@ -153,10 +218,32 @@ pub fn delete_raw_file(state: State<'_, AppState>, id: String) -> AppResult<Vec<
         return Err(user_error("only raw files can be deleted by cleanup"));
     }
     let path = PathBuf::from(&item.path);
+    let settings = state.db.load_settings()?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|_| user_error("raw file is no longer available"))?;
+    let source_roots = settings
+        .source_folders
+        .iter()
+        .filter_map(|source| Path::new(source).canonicalize().ok())
+        .collect::<Vec<_>>();
+    if !belongs_to_roots(&canonical_path, &source_roots)
+        || belongs_to_roots(&canonical_path, &output_roots(&settings))
+    {
+        return Err(user_error(
+            "cleanup refused a file outside the configured raw source folders",
+        ));
+    }
     if path.exists() {
-        std::fs::remove_file(path)?;
+        std::fs::remove_file(&path)?;
     }
     state.db.delete_media(&id)?;
+    if let Some(thumbnail) = item.thumbnail_path {
+        let thumbnail = PathBuf::from(thumbnail);
+        if thumbnail.starts_with(&state.thumbnail_dir) && thumbnail.is_file() {
+            let _ = std::fs::remove_file(thumbnail);
+        }
+    }
     state.db.list_media(Some(MediaKind::Raw))
 }
 
@@ -169,6 +256,63 @@ fn resolve_clip_dir(settings: &AppSettings, data_dir: &Path) -> AppResult<PathBu
         .unwrap_or_else(|| data_dir.join("clips"));
     std::fs::create_dir_all(&clip_dir)?;
     Ok(clip_dir)
+}
+
+fn validate_settings(settings: &AppSettings) -> AppResult<()> {
+    if !(50..=99).contains(&settings.cleanup_threshold_percent) {
+        return Err(user_error(
+            "cleanup threshold must be between 50 and 99 percent",
+        ));
+    }
+    if settings.storage_limit_bytes == Some(0) {
+        return Err(user_error("storage limit must be greater than zero"));
+    }
+    if settings
+        .source_folders
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err(user_error("source folders cannot contain an empty path"));
+    }
+    let outputs = output_roots(settings);
+    for source in &settings.source_folders {
+        let source_path = Path::new(source);
+        if outputs
+            .iter()
+            .any(|output| path_is_within(output, source_path))
+        {
+            return Err(user_error(
+                "clip output cannot be inside a source folder; choose a separate clip or working folder",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn output_roots(settings: &AppSettings) -> Vec<PathBuf> {
+    settings
+        .clip_folder
+        .as_ref()
+        .or(settings.working_folder.as_ref())
+        .map(PathBuf::from)
+        .into_iter()
+        .collect()
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    let path_key = media::normalized_path_key(path);
+    let root_key = media::normalized_path_key(root);
+    path_key == root_key || path_key.starts_with(&format!("{root_key}\\"))
+}
+
+fn belongs_to_sources(path: &Path, sources: &[String]) -> bool {
+    sources
+        .iter()
+        .any(|source| path_is_within(path, Path::new(source)))
+}
+
+fn belongs_to_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path_is_within(path, root))
 }
 
 fn repair_missing_thumbnails(state: &State<'_, AppState>) -> AppResult<()> {

@@ -30,6 +30,7 @@ pub fn run() {
             update_media_tags,
             update_media_notes,
             list_collections,
+            list_collection_media,
             create_collection,
             add_to_collection,
             create_clip,

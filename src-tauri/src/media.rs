@@ -4,6 +4,7 @@ use crate::models::{CreateClipRequest, MediaItem, MediaKind};
 use chrono::Utc;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -15,6 +16,8 @@ pub fn scan_folder(
     folder: &Path,
     ffmpeg: &Ffmpeg,
     thumbnail_dir: &Path,
+    existing: &HashMap<String, MediaItem>,
+    excluded_roots: &[PathBuf],
 ) -> AppResult<Vec<MediaItem>> {
     if !folder.exists() {
         return Err(user_error(format!(
@@ -26,6 +29,7 @@ pub fn scan_folder(
     let files = WalkDir::new(folder)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| !is_excluded(entry.path(), excluded_roots))
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
@@ -34,7 +38,15 @@ pub fn scan_folder(
 
     let items = files
         .par_iter()
-        .filter_map(|path| build_raw_item(path, ffmpeg, thumbnail_dir).ok())
+        .filter_map(|path| {
+            let key = normalized_path_key(path);
+            if let Some(item) = existing.get(&key) {
+                if file_is_unchanged(path, item) {
+                    return Some(item.clone());
+                }
+            }
+            build_raw_item(path, ffmpeg, thumbnail_dir).ok()
+        })
         .collect();
     Ok(items)
 }
@@ -46,14 +58,45 @@ pub fn build_clip_item(
     ffmpeg: &Ffmpeg,
     thumbnail_dir: &Path,
 ) -> AppResult<MediaItem> {
-    ffmpeg.trim(
+    let stem = output_path
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("clip");
+    let temp_path = output_path.with_file_name(format!(".{stem}.reelspace-part.mp4"));
+    if temp_path.exists() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    let trim_result = ffmpeg.trim(
         Path::new(&source.path),
-        &output_path,
+        &temp_path,
         request.start_seconds,
         request.end_seconds,
         request.accurate,
-    )?;
-    let mut item = build_item_base(&output_path, MediaKind::Clip, ffmpeg, thumbnail_dir)?;
+    );
+    if let Err(error) = trim_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    let usable = temp_path
+        .metadata()
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    if !usable {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(user_error("FFmpeg did not create a usable clip"));
+    }
+    if output_path.exists() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(user_error("a clip already exists at the generated path"));
+    }
+    std::fs::rename(&temp_path, &output_path)?;
+    let mut item = match build_item_base(&output_path, MediaKind::Clip, ffmpeg, thumbnail_dir) {
+        Ok(item) => item,
+        Err(error) => {
+            let _ = std::fs::remove_file(&output_path);
+            return Err(error);
+        }
+    };
     item.source_path = Some(source.path.clone());
     item.tags = source.tags.clone();
     item.notes = request.title.clone();
@@ -103,9 +146,10 @@ pub fn clip_output_path(
         .filter(|title| !title.trim().is_empty())
         .map(sanitize_filename)
         .unwrap_or_else(|| sanitize_filename(&source.filename));
-    let start = request.start_seconds.round() as u64;
-    let end = request.end_seconds.round() as u64;
-    clip_dir.join(format!("{safe_title}_{start}-{end}.mp4"))
+    let start = (request.start_seconds * 1000.0).round().max(0.0) as u64;
+    let end = (request.end_seconds * 1000.0).round().max(0.0) as u64;
+    let base = clip_dir.join(format!("{safe_title}_{start}-{end}.mp4"));
+    unique_path(base)
 }
 
 fn build_raw_item(path: &Path, ffmpeg: &Ffmpeg, thumbnail_dir: &Path) -> AppResult<MediaItem> {
@@ -174,6 +218,49 @@ fn is_video_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn normalized_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
+fn is_excluded(path: &Path, excluded_roots: &[PathBuf]) -> bool {
+    let key = normalized_path_key(path);
+    excluded_roots.iter().any(|root| {
+        let root_key = normalized_path_key(root);
+        key == root_key || key.starts_with(&format!("{root_key}\\"))
+    })
+}
+
+fn file_is_unchanged(path: &Path, item: &MediaItem) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+    metadata.len() == item.file_size && modified_at == item.modified_at
+}
+
+fn unique_path(base: PathBuf) -> PathBuf {
+    if !base.exists() {
+        return base;
+    }
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    let stem = base.file_stem().and_then(OsStr::to_str).unwrap_or("clip");
+    for suffix in 2..=10_000 {
+        let candidate = parent.join(format!("{stem}-{suffix}.mp4"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{stem}-{}.mp4", Utc::now().timestamp_millis()))
+}
+
 fn infer_shadowplay_tag(path: &Path) -> String {
     let parent = path
         .parent()
@@ -234,15 +321,32 @@ fn thumbnail_offsets(duration_seconds: f64) -> Vec<f64> {
 }
 
 fn sanitize_filename(value: &str) -> String {
-    let mut out = value
+    let out = value
         .chars()
         .map(|ch| match ch {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            ch if ch.is_control() => '_',
             _ => ch,
         })
+        .take(96)
         .collect::<String>();
-    if out.len() > 96 {
-        out.truncate(96);
+    let cleaned = out.trim_matches(['.', ' ']);
+    if cleaned.is_empty() {
+        "clip".to_string()
+    } else {
+        cleaned.to_string()
     }
-    out.trim_matches(['.', ' ']).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filename_sanitizing_is_unicode_safe_and_nonempty() {
+        let long = format!("{}é", "a".repeat(95));
+        assert_eq!(sanitize_filename(&long).chars().count(), 96);
+        assert_eq!(sanitize_filename("..."), "clip");
+        assert_eq!(sanitize_filename("bad/name\0"), "bad_name_");
+    }
 }

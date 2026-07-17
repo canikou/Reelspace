@@ -145,12 +145,17 @@ impl Ffmpeg {
 
         let start = format!("{:.3}", start_seconds.max(0.0));
         let duration = format!("{:.3}", end_seconds - start_seconds);
-        let mut command = Command::new(ffmpeg);
-        command.args(["-y", "-hide_banner", "-loglevel", "error", "-ss", &start]);
-        command.arg("-i").arg(source);
-        command.args(["-t", &duration]);
-        if accurate {
-            command.args([
+        let run = |video_args: &[&str]| -> AppResult<std::process::Output> {
+            let mut command = Command::new(ffmpeg);
+            command.args(["-y", "-hide_banner", "-loglevel", "error", "-ss", &start]);
+            command.arg("-i").arg(source);
+            command.args(["-t", &duration]);
+            command.args(video_args);
+            command.arg(output_path);
+            command.output().map_err(Into::into)
+        };
+        let output = if accurate {
+            let nvenc = run(&[
                 "-c:v",
                 "h264_nvenc",
                 "-preset",
@@ -161,13 +166,18 @@ impl Ffmpeg {
                 "aac",
                 "-b:a",
                 "192k",
-            ]);
+            ])?;
+            if nvenc.status.success() {
+                nvenc
+            } else {
+                run(&[
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a",
+                    "192k",
+                ])?
+            }
         } else {
-            command.args(["-c", "copy", "-avoid_negative_ts", "make_zero"]);
-        }
-        command.arg(output_path);
-
-        let output = command.output()?;
+            run(&["-c", "copy", "-avoid_negative_ts", "make_zero"])?
+        };
         if output.status.success() {
             Ok(())
         } else if accurate {
