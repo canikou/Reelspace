@@ -68,7 +68,7 @@ export function App() {
     () => ({
       view: setPlaying,
       trim: (item: MediaItem) => { setPlaying(null); setTrimming(item); },
-      reveal: (item: MediaItem) => api.revealInExplorer(item.path).catch(showError),
+      reveal: (item: MediaItem) => api.revealInExplorer(item.id).catch(showError),
       notes: (item: MediaItem) => setEditing({ kind: "notes", item }),
       tags: (item: MediaItem) => setEditing({ kind: "tags", item }),
       addToCollection: setCollectionTarget

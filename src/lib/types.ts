@@ -1,5 +1,40 @@
 export type MediaKind = "raw" | "clip";
 
+export type AppErrorCode =
+  | "invalidRequest"
+  | "invalidPath"
+  | "pathOutsideManagedRoots"
+  | "sourceUnavailable"
+  | "permissionDenied"
+  | "fileNotFound"
+  | "fileChanged"
+  | "unsupportedMedia"
+  | "corruptMedia"
+  | "ffprobeUnavailable"
+  | "ffprobeFailed"
+  | "ffmpegUnavailable"
+  | "ffmpegFailed"
+  | "mediaProcessTimeout"
+  | "mediaProcessCancelled"
+  | "databaseUnavailable"
+  | "databaseBusy"
+  | "databaseMigrationFailed"
+  | "databaseIntegrityFailed"
+  | "diskFull"
+  | "destinationCollision"
+  | "exportCancelled"
+  | "exportFailed"
+  | "thumbnailGenerationFailed"
+  | "cacheOperationFailed"
+  | "windowsIntegrationFailed"
+  | "internal";
+
+export interface AppErrorPayload {
+  code: AppErrorCode;
+  message: string;
+  retryable: boolean;
+}
+
 export interface AppSettings {
   sourceFolders: string[];
   workingFolder?: string | null;

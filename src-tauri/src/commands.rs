@@ -1,4 +1,4 @@
-use crate::error::{user_error, AppResult};
+use crate::error::{app_error, user_error, AppError, AppResult, ErrorCode};
 use crate::explorer;
 use crate::media;
 use crate::models::{
@@ -51,7 +51,7 @@ where
                 "media.job.cancelled",
                 json!({ "jobId": job_id, "operation": job_operation, "phase": "queued" }),
             );
-            return Err(user_error("media job cancelled"));
+            return Err(AppError::cancelled("Media job"));
         };
         telemetry.event(
             "info",
@@ -93,7 +93,10 @@ where
         result
     })
     .await
-    .map_err(|error| user_error(format!("{operation} worker failed: {error}")))?;
+    .map_err(|error| {
+        app_error(ErrorCode::Internal, format!("{operation} worker failed"))
+            .with_detail(error.to_string())
+    })?;
     task_result
 }
 
@@ -212,6 +215,8 @@ pub async fn get_media_audio_tracks(
     id: String,
     session_id: String,
 ) -> AppResult<Vec<AudioTrack>> {
+    validate_id(&id, "media")?;
+    validate_session_id(&session_id)?;
     let item = state.db.get_media(&id)?;
     let runtime = state.inner().clone();
     let job_runtime = runtime.clone();
@@ -229,7 +234,7 @@ pub async fn get_media_audio_tracks(
         Some(Arc::clone(&cancellation)),
         move || {
             if cancellation.load(Ordering::Acquire) {
-                return Err(user_error("audio probe cancelled"));
+                return Err(AppError::cancelled("Audio probe"));
             }
             job_runtime
                 .ffmpeg
@@ -246,6 +251,8 @@ pub async fn get_audio_track_preview(
     stream_index: u32,
     session_id: String,
 ) -> AppResult<AudioPreviewResult> {
+    validate_id(&id, "media")?;
+    validate_session_id(&session_id)?;
     let item = state.db.get_media(&id)?;
     let output = state.audio_preview_dir.join(format!(
         "{}-{}-{}-{}.m4a",
@@ -315,6 +322,9 @@ pub async fn get_audio_track_preview(
 
 #[tauri::command]
 pub fn cancel_audio_preview_session(state: State<'_, AppState>, session_id: String) {
+    if validate_session_id(&session_id).is_err() {
+        return;
+    }
     let cancelled = state.preview_coordinator.cancel_session(&session_id);
     state.telemetry.event(
         "info",
@@ -384,11 +394,18 @@ pub fn update_media_tags(
     id: String,
     tags: Vec<String>,
 ) -> AppResult<MediaItem> {
+    validate_id(&id, "media")?;
+    if tags.len() > 64 {
+        return Err(user_error("a media item cannot have more than 64 tags"));
+    }
     let normalized = tags
         .into_iter()
         .map(|tag| tag.trim().to_string())
         .filter(|tag| !tag.is_empty())
         .collect::<Vec<_>>();
+    if normalized.iter().any(|tag| tag.chars().count() > 64) {
+        return Err(user_error("tags cannot be longer than 64 characters"));
+    }
     state.db.update_tags(&id, &normalized)?;
     state.db.get_media(&id)
 }
@@ -399,6 +416,10 @@ pub fn update_media_notes(
     id: String,
     notes: Option<String>,
 ) -> AppResult<MediaItem> {
+    validate_id(&id, "media")?;
+    if notes.as_ref().is_some_and(|value| value.len() > 64 * 1024) {
+        return Err(user_error("notes cannot be larger than 64 KB"));
+    }
     let cleaned = notes
         .as_deref()
         .map(str::trim)
@@ -417,6 +438,7 @@ pub fn list_collection_media(
     state: State<'_, AppState>,
     collection_id: String,
 ) -> AppResult<Vec<MediaItem>> {
+    validate_id(&collection_id, "collection")?;
     state.db.list_collection_media(&collection_id)
 }
 
@@ -425,6 +447,9 @@ pub fn create_collection(state: State<'_, AppState>, name: String) -> AppResult<
     let cleaned = name.trim();
     if cleaned.is_empty() {
         return Err(user_error("collection name cannot be empty"));
+    }
+    if cleaned.chars().count() > 120 {
+        return Err(user_error("collection name cannot exceed 120 characters"));
     }
     state
         .db
@@ -438,6 +463,8 @@ pub fn add_to_collection(
     collection_id: String,
     media_id: String,
 ) -> AppResult<Vec<Collection>> {
+    validate_id(&collection_id, "collection")?;
+    validate_id(&media_id, "media")?;
     state
         .db
         .add_to_collection(&collection_id, &media_id, Utc::now().timestamp())?;
@@ -465,10 +492,31 @@ pub async fn create_clip(
 }
 
 fn create_clip_inner(state: &AppState, request: CreateClipRequest) -> AppResult<MediaItem> {
+    validate_id(&request.source_id, "media")?;
+    if let Some(session_id) = request.session_id.as_deref() {
+        validate_session_id(session_id)?;
+    }
+    if request
+        .title
+        .as_ref()
+        .is_some_and(|title| title.chars().count() > 120)
+    {
+        return Err(user_error("clip title cannot exceed 120 characters"));
+    }
+    if request
+        .enabled_audio_track_indices
+        .as_ref()
+        .is_some_and(|tracks| tracks.len() > 32)
+    {
+        return Err(user_error("too many audio tracks were selected"));
+    }
     let settings = state.db.load_settings()?;
     let source = state.db.get_media(&request.source_id)?;
     if source.kind != MediaKind::Raw {
-        return Err(user_error("clips must be created from raw media"));
+        return Err(app_error(
+            ErrorCode::InvalidRequest,
+            "Clips must be created from raw media",
+        ));
     }
     if !request.start_seconds.is_finite()
         || !request.end_seconds.is_finite()
@@ -481,7 +529,10 @@ fn create_clip_inner(state: &AppState, request: CreateClipRequest) -> AppResult<
         return Err(user_error("trim end exceeds the source duration"));
     }
     if !Path::new(&source.path).is_file() {
-        return Err(user_error("source file is no longer available"));
+        return Err(app_error(
+            ErrorCode::SourceUnavailable,
+            "The source recording is no longer available",
+        ));
     }
     let audio_tracks = state.ffmpeg.audio_tracks(Path::new(&source.path))?;
     let valid_indices = audio_tracks
@@ -537,8 +588,10 @@ fn create_clip_inner(state: &AppState, request: CreateClipRequest) -> AppResult<
 }
 
 #[tauri::command]
-pub fn reveal_in_explorer(path: String) -> AppResult<()> {
-    explorer::reveal(Path::new(&path))
+pub fn reveal_in_explorer(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    validate_id(&id, "media")?;
+    let item = state.db.get_media(&id)?;
+    explorer::reveal(Path::new(&item.path))
 }
 
 #[tauri::command]
@@ -556,15 +609,23 @@ pub fn get_cleanup_candidates(state: State<'_, AppState>) -> AppResult<Vec<Media
 
 #[tauri::command]
 pub fn delete_raw_file(state: State<'_, AppState>, id: String) -> AppResult<Vec<MediaItem>> {
+    validate_id(&id, "media")?;
     let item = state.db.get_media(&id)?;
     if item.kind != MediaKind::Raw {
-        return Err(user_error("only raw files can be deleted by cleanup"));
+        return Err(app_error(
+            ErrorCode::InvalidRequest,
+            "Only raw recordings can be deleted by cleanup",
+        ));
     }
     let path = PathBuf::from(&item.path);
     let settings = state.db.load_settings()?;
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|_| user_error("raw file is no longer available"))?;
+    let canonical_path = path.canonicalize().map_err(|error| {
+        app_error(
+            ErrorCode::SourceUnavailable,
+            "The raw recording is no longer available",
+        )
+        .with_detail(error.to_string())
+    })?;
     let source_roots = settings
         .source_folders
         .iter()
@@ -573,8 +634,9 @@ pub fn delete_raw_file(state: State<'_, AppState>, id: String) -> AppResult<Vec<
     if !belongs_to_roots(&canonical_path, &source_roots)
         || belongs_to_roots(&canonical_path, &output_roots(&settings))
     {
-        return Err(user_error(
-            "cleanup refused a file outside the configured raw source folders",
+        return Err(app_error(
+            ErrorCode::PathOutsideManagedRoots,
+            "Cleanup refused a file outside the configured raw source folders",
         ));
     }
     if path.exists() {
@@ -617,6 +679,25 @@ fn validate_settings(settings: &AppSettings) -> AppResult<()> {
         .any(|value| value.trim().is_empty())
     {
         return Err(user_error("source folders cannot contain an empty path"));
+    }
+    if settings.source_folders.len() > 64 {
+        return Err(user_error(
+            "no more than 64 source folders can be configured",
+        ));
+    }
+    for path in settings
+        .source_folders
+        .iter()
+        .map(String::as_str)
+        .chain(settings.working_folder.as_deref())
+        .chain(settings.clip_folder.as_deref())
+    {
+        if path.len() > 32_767 || !Path::new(path).is_absolute() {
+            return Err(app_error(
+                ErrorCode::InvalidPath,
+                "Configured folders must use absolute Windows paths",
+            ));
+        }
     }
     let outputs = output_roots(settings);
     for source in &settings.source_folders {
@@ -809,4 +890,61 @@ fn stable_id(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.to_lowercase().as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn validate_id(id: &str, kind: &str) -> AppResult<()> {
+    if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(user_error(format!("{kind} identifier is invalid")))
+    }
+}
+
+fn validate_session_id(session_id: &str) -> AppResult<()> {
+    let valid = !session_id.is_empty()
+        && session_id.len() <= 128
+        && session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
+    if valid {
+        Ok(())
+    } else {
+        Err(user_error("media session identifier is invalid"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_root_checks_do_not_accept_sibling_prefixes() {
+        assert!(path_is_within(
+            Path::new("C:\\captures\\game\\clip.mp4"),
+            Path::new("C:\\captures")
+        ));
+        assert!(!path_is_within(
+            Path::new("C:\\captures-private\\clip.mp4"),
+            Path::new("C:\\captures")
+        ));
+    }
+
+    #[test]
+    fn generated_outputs_cannot_be_configured_inside_raw_sources() {
+        let settings = AppSettings {
+            source_folders: vec!["C:\\captures".to_string()],
+            clip_folder: Some("C:\\captures\\clips".to_string()),
+            ..AppSettings::default()
+        };
+        let error = validate_settings(&settings).expect_err("nested output must fail");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn ipc_identifiers_have_a_bounded_stable_format() {
+        assert!(validate_id(&"a".repeat(64), "media").is_ok());
+        assert!(validate_id("../media", "media").is_err());
+        assert!(validate_session_id("trim-session:42").is_ok());
+        assert!(validate_session_id("bad/session").is_err());
+    }
 }

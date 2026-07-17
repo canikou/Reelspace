@@ -1,4 +1,4 @@
-use crate::error::{user_error, AppResult};
+use crate::error::{app_error, user_error, AppResult, ErrorCode};
 use crate::ffmpeg::{Ffmpeg, TrimMethod};
 use crate::models::{CreateClipRequest, MediaItem, MediaKind};
 use chrono::Utc;
@@ -6,10 +6,49 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "avi", "webm", "m4v"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFingerprint {
+    pub size: u64,
+    pub modified_ns: u128,
+}
+
+impl FileFingerprint {
+    pub fn read(path: &Path) -> AppResult<Self> {
+        let metadata = path.metadata()?;
+        if !metadata.is_file() {
+            return Err(app_error(
+                ErrorCode::InvalidPath,
+                "The media path is not a file",
+            ));
+        }
+        if metadata.len() == 0 {
+            return Err(app_error(
+                ErrorCode::UnsupportedMedia,
+                "Empty media files are not indexed",
+            ));
+        }
+        let modified_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        Ok(Self {
+            size: metadata.len(),
+            modified_ns,
+        })
+    }
+
+    pub fn token(&self) -> String {
+        format!("{}:{}", self.size, self.modified_ns)
+    }
+}
 
 pub fn scan_folder(
     folder: &Path,
@@ -19,10 +58,11 @@ pub fn scan_folder(
     excluded_roots: &[PathBuf],
 ) -> AppResult<Vec<MediaItem>> {
     if !folder.exists() {
-        return Err(user_error(format!(
-            "source folder does not exist: {}",
-            folder.display()
-        )));
+        return Err(app_error(
+            ErrorCode::SourceUnavailable,
+            "A configured source folder is unavailable",
+        )
+        .with_detail(folder.display().to_string()));
     }
 
     let files = WalkDir::new(folder)
@@ -61,7 +101,8 @@ pub fn build_clip_item(
         .file_stem()
         .and_then(OsStr::to_str)
         .unwrap_or("clip");
-    let temp_path = output_path.with_file_name(format!(".{stem}.reelspace-part.mp4"));
+    let source_fingerprint = FileFingerprint::read(Path::new(&source.path))?;
+    let temp_path = unique_temp_path(&output_path, stem, "mp4");
     if temp_path.exists() {
         let _ = std::fs::remove_file(&temp_path);
     }
@@ -89,11 +130,24 @@ pub fn build_clip_item(
         .unwrap_or(false);
     if !usable {
         let _ = std::fs::remove_file(&temp_path);
-        return Err(user_error("FFmpeg did not create a usable clip"));
+        return Err(app_error(
+            ErrorCode::ExportFailed,
+            "FFmpeg did not create a usable clip",
+        ));
+    }
+    if FileFingerprint::read(Path::new(&source.path))? != source_fingerprint {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(app_error(
+            ErrorCode::FileChanged,
+            "The source recording changed during export; no clip was saved",
+        ));
     }
     if output_path.exists() {
         let _ = std::fs::remove_file(&temp_path);
-        return Err(user_error("a clip already exists at the generated path"));
+        return Err(app_error(
+            ErrorCode::DestinationCollision,
+            "A clip already exists at the generated destination",
+        ));
     }
     if let Err(error) = std::fs::rename(&temp_path, &output_path) {
         let _ = std::fs::remove_file(&temp_path);
@@ -121,8 +175,11 @@ pub fn ensure_thumbnail(
     ffmpeg: &Ffmpeg,
     thumbnail_dir: &Path,
 ) -> AppResult<Option<PathBuf>> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(user_error("thumbnail media identifier is invalid"));
+    }
     let thumbnail_path = thumbnail_dir.join(format!("{id}.jpg"));
-    let temp_path = thumbnail_dir.join(format!("{id}.part.jpg"));
+    let temp_path = unique_temp_path(&thumbnail_path, id, "jpg");
     if is_usable_thumbnail(&thumbnail_path) {
         return Ok(Some(thumbnail_path));
     }
@@ -140,7 +197,10 @@ pub fn ensure_thumbnail(
                 return Ok(Some(thumbnail_path));
             }
             Ok(()) => {
-                last_error = Some(user_error("FFmpeg produced an empty thumbnail"));
+                last_error = Some(app_error(
+                    ErrorCode::ThumbnailGenerationFailed,
+                    "FFmpeg produced an invalid thumbnail",
+                ));
             }
             Err(error) => last_error = Some(error),
         }
@@ -362,6 +422,15 @@ fn sanitize_filename(value: &str) -> String {
     }
 }
 
+fn unique_temp_path(output_path: &Path, stem: &str, extension: &str) -> PathBuf {
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    output_path.with_file_name(format!(
+        ".{stem}-{}-{sequence}.reelspace-part.{extension}",
+        std::process::id()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,5 +441,17 @@ mod tests {
         assert_eq!(sanitize_filename(&long).chars().count(), 96);
         assert_eq!(sanitize_filename("..."), "clip");
         assert_eq!(sanitize_filename("bad/name\0"), "bad_name_");
+    }
+
+    #[test]
+    fn temporary_outputs_stay_next_to_the_destination() {
+        let output = Path::new("C:\\clips\\final.mp4");
+        let temporary = unique_temp_path(output, "final", "mp4");
+        assert_eq!(temporary.parent(), output.parent());
+        assert!(temporary
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".reelspace-part.mp4"));
     }
 }

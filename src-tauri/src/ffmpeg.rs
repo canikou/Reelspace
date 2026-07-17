@@ -1,4 +1,4 @@
-use crate::error::{user_error, AppResult};
+use crate::error::{app_error, user_error, AppError, AppResult, ErrorCode};
 use crate::models::{AudioTrack, MediaMetadata, ToolHealth};
 use serde::Deserialize;
 use std::io::Read;
@@ -80,24 +80,20 @@ impl Ffmpeg {
         #[cfg(not(debug_assertions))]
         let manifest_ffprobe = None;
 
+        #[cfg(debug_assertions)]
         let ffmpeg_path = bundled_ffmpeg
             .or(manifest_ffmpeg)
-            .or_else(|| {
-                first_existing([
-                    "vendor/ffmpeg/bin/ffmpeg.exe",
-                    "../vendor/ffmpeg/bin/ffmpeg.exe",
-                ])
-            })
+            .or_else(|| first_existing(["vendor/ffmpeg/bin/ffmpeg.exe"]))
             .or_else(|| which::which("ffmpeg").ok());
+        #[cfg(debug_assertions)]
         let ffprobe_path = bundled_ffprobe
             .or(manifest_ffprobe)
-            .or_else(|| {
-                first_existing([
-                    "vendor/ffmpeg/bin/ffprobe.exe",
-                    "../vendor/ffmpeg/bin/ffprobe.exe",
-                ])
-            })
+            .or_else(|| first_existing(["vendor/ffmpeg/bin/ffprobe.exe"]))
             .or_else(|| which::which("ffprobe").ok());
+        #[cfg(not(debug_assertions))]
+        let ffmpeg_path = bundled_ffmpeg;
+        #[cfg(not(debug_assertions))]
+        let ffprobe_path = bundled_ffprobe;
 
         Self {
             ffmpeg_path,
@@ -140,10 +136,12 @@ impl Ffmpeg {
         path: &Path,
         cancelled: Option<&AtomicBool>,
     ) -> AppResult<ProbeResponse> {
-        let ffprobe = self
-            .ffprobe_path
-            .as_ref()
-            .ok_or_else(|| user_error("FFprobe is not configured"))?;
+        let ffprobe = self.ffprobe_path.as_ref().ok_or_else(|| {
+            app_error(
+                ErrorCode::FfprobeUnavailable,
+                "FFprobe is not available in the Reelspace installation",
+            )
+        })?;
         let mut command = Command::new(ffprobe);
         command
             .args([
@@ -158,19 +156,28 @@ impl Ffmpeg {
         let output =
             run_with_timeout_cancellable(command, Duration::from_secs(30), "FFprobe", cancelled)?;
         if !output.success {
-            return Err(user_error(format!(
-                "FFprobe failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(app_error(
+                ErrorCode::FfprobeFailed,
+                "FFprobe could not read this media file",
+            )
+            .with_detail(String::from_utf8_lossy(&output.stderr).trim()));
         }
-        serde_json::from_slice(&output.stdout).map_err(Into::into)
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            app_error(
+                ErrorCode::CorruptMedia,
+                "FFprobe returned invalid metadata for this media file",
+            )
+            .with_detail(error.to_string())
+        })
     }
 
     pub fn thumbnail(&self, source: &Path, output_path: &Path, at_seconds: f64) -> AppResult<()> {
-        let ffmpeg = self
-            .ffmpeg_path
-            .as_ref()
-            .ok_or_else(|| user_error("FFmpeg is not configured"))?;
+        let ffmpeg = self.ffmpeg_path.as_ref().ok_or_else(|| {
+            app_error(
+                ErrorCode::FfmpegUnavailable,
+                "FFmpeg is not available in the Reelspace installation",
+            )
+        })?;
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -180,9 +187,11 @@ impl Ffmpeg {
         if output.success {
             Ok(())
         } else {
-            Err(user_error(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ))
+            Err(app_error(
+                ErrorCode::ThumbnailGenerationFailed,
+                "FFmpeg could not generate a thumbnail",
+            )
+            .with_detail(String::from_utf8_lossy(&output.stderr)))
         }
     }
 
@@ -193,10 +202,12 @@ impl Ffmpeg {
         stream_index: u32,
         cancelled: &AtomicBool,
     ) -> AppResult<AudioPreviewMethod> {
-        let ffmpeg = self
-            .ffmpeg_path
-            .as_ref()
-            .ok_or_else(|| user_error("FFmpeg is not configured"))?;
+        let ffmpeg = self.ffmpeg_path.as_ref().ok_or_else(|| {
+            app_error(
+                ErrorCode::FfmpegUnavailable,
+                "FFmpeg is not available in the Reelspace installation",
+            )
+        })?;
         if is_usable_media_file(output_path) {
             return Ok(AudioPreviewMethod::Cache);
         }
@@ -236,14 +247,18 @@ impl Ffmpeg {
         };
         if !output.success {
             let _ = std::fs::remove_file(&temp_path);
-            return Err(user_error(format!(
-                "audio preview failed: {}",
-                output.stderr.trim()
-            )));
+            return Err(app_error(
+                ErrorCode::FfmpegFailed,
+                "FFmpeg could not prepare the audio preview",
+            )
+            .with_detail(output.stderr.trim()));
         }
         if !is_usable_media_file(&temp_path) {
             let _ = std::fs::remove_file(&temp_path);
-            return Err(user_error("FFmpeg produced an empty audio preview"));
+            return Err(app_error(
+                ErrorCode::FfmpegFailed,
+                "FFmpeg produced an invalid audio preview",
+            ));
         }
         if output_path.exists() {
             std::fs::remove_file(output_path)?;
@@ -264,10 +279,12 @@ impl Ffmpeg {
         accurate: bool,
         audio_track_indices: &[u32],
     ) -> AppResult<TrimMethod> {
-        let ffmpeg = self
-            .ffmpeg_path
-            .as_ref()
-            .ok_or_else(|| user_error("FFmpeg is not configured"))?;
+        let ffmpeg = self.ffmpeg_path.as_ref().ok_or_else(|| {
+            app_error(
+                ErrorCode::FfmpegUnavailable,
+                "FFmpeg is not available in the Reelspace installation",
+            )
+        })?;
         if end_seconds <= start_seconds {
             return Err(user_error("trim end must be after trim start"));
         }
@@ -345,14 +362,16 @@ impl Ffmpeg {
         if output.success {
             Ok(method)
         } else if accurate {
-            Err(user_error(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ))
+            Err(
+                app_error(ErrorCode::ExportFailed, "FFmpeg could not export the clip")
+                    .with_detail(String::from_utf8_lossy(&output.stderr)),
+            )
         } else {
-            Err(user_error(format!(
-                "lossless trim failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )))
+            Err(app_error(
+                ErrorCode::ExportFailed,
+                "FFmpeg could not export the lossless clip",
+            )
+            .with_detail(String::from_utf8_lossy(&output.stderr)))
         }
     }
 }
@@ -429,7 +448,7 @@ fn run_with_timeout_cancellable(
             if let Some(reader) = stderr_reader {
                 let _ = reader.join();
             }
-            return Err(user_error(format!("{operation} cancelled")));
+            return Err(AppError::cancelled(operation));
         }
         if let Some(status) = child.try_wait()? {
             let stdout = stdout_reader
@@ -453,10 +472,9 @@ fn run_with_timeout_cancellable(
             if let Some(reader) = stderr_reader {
                 let _ = reader.join();
             }
-            return Err(user_error(format!(
-                "{operation} timed out after {} seconds",
-                timeout.as_secs()
-            )));
+            return Err(
+                AppError::timeout(operation).with_detail(format!("timeout={}s", timeout.as_secs()))
+            );
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -477,7 +495,7 @@ fn run_cancellable(mut command: Command, cancelled: &AtomicBool) -> AppResult<Pr
             if let Some(reader) = stderr_reader {
                 let _ = reader.join();
             }
-            return Err(user_error("audio preview cancelled"));
+            return Err(AppError::cancelled("Audio preview"));
         }
         if started.elapsed() >= Duration::from_secs(30 * 60) {
             let _ = child.kill();
@@ -485,7 +503,7 @@ fn run_cancellable(mut command: Command, cancelled: &AtomicBool) -> AppResult<Pr
             if let Some(reader) = stderr_reader {
                 let _ = reader.join();
             }
-            return Err(user_error("audio preview timed out after 30 minutes"));
+            return Err(AppError::timeout("Audio preview").with_detail("timeout=1800s"));
         }
         if let Some(status) = child.try_wait()? {
             let stderr = stderr_reader
@@ -544,6 +562,7 @@ fn existing_file(path: PathBuf) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+#[cfg(debug_assertions)]
 fn first_existing<const N: usize>(candidates: [&str; N]) -> Option<PathBuf> {
     candidates
         .into_iter()

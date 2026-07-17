@@ -1,6 +1,8 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
+  AppErrorCode,
+  AppErrorPayload,
   AppSnapshot,
   AudioPreviewResult,
   AudioTrack,
@@ -11,37 +13,85 @@ import type {
   StorageStats
 } from "./types";
 
+const ERROR_CODES = new Set<AppErrorCode>([
+  "invalidRequest", "invalidPath", "pathOutsideManagedRoots", "sourceUnavailable",
+  "permissionDenied", "fileNotFound", "fileChanged", "unsupportedMedia", "corruptMedia",
+  "ffprobeUnavailable", "ffprobeFailed", "ffmpegUnavailable", "ffmpegFailed",
+  "mediaProcessTimeout", "mediaProcessCancelled", "databaseUnavailable", "databaseBusy",
+  "databaseMigrationFailed", "databaseIntegrityFailed", "diskFull", "destinationCollision",
+  "exportCancelled", "exportFailed", "thumbnailGenerationFailed", "cacheOperationFailed",
+  "windowsIntegrationFailed", "internal"
+]);
+
+export class ReelspaceError extends Error implements AppErrorPayload {
+  readonly code: AppErrorCode;
+  readonly retryable: boolean;
+
+  constructor(payload: AppErrorPayload) {
+    super(payload.message);
+    this.name = "ReelspaceError";
+    this.code = payload.code;
+    this.retryable = payload.retryable;
+  }
+}
+
+export function normalizeAppError(value: unknown): ReelspaceError {
+  if (value instanceof ReelspaceError) return value;
+  if (value && typeof value === "object") {
+    const candidate = value as Partial<AppErrorPayload>;
+    if (
+      typeof candidate.code === "string" && ERROR_CODES.has(candidate.code as AppErrorCode) &&
+      typeof candidate.message === "string" && typeof candidate.retryable === "boolean"
+    ) {
+      return new ReelspaceError(candidate as AppErrorPayload);
+    }
+  }
+  return new ReelspaceError({
+    code: "internal",
+    message: value instanceof Error ? value.message : "An unexpected Reelspace error occurred",
+    retryable: false
+  });
+}
+
+async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw normalizeAppError(error);
+  }
+}
+
 export function mediaSrc(path?: string | null): string | undefined {
   return path ? convertFileSrc(path) : undefined;
 }
 
 export const api = {
-  getAppState: () => invoke<AppSnapshot>("get_app_state"),
-  saveSettings: (settings: AppSettings) => invoke<AppSnapshot>("save_settings", { settings }),
-  scanSources: () => invoke<MediaItem[]>("scan_sources"),
-  repairThumbnails: () => invoke<MediaItem[]>("repair_thumbnails"),
-  listMedia: (kind?: MediaKind) => invoke<MediaItem[]>("list_media", { kind }),
+  getAppState: () => invokeCommand<AppSnapshot>("get_app_state"),
+  saveSettings: (settings: AppSettings) => invokeCommand<AppSnapshot>("save_settings", { settings }),
+  scanSources: () => invokeCommand<MediaItem[]>("scan_sources"),
+  repairThumbnails: () => invokeCommand<MediaItem[]>("repair_thumbnails"),
+  listMedia: (kind?: MediaKind) => invokeCommand<MediaItem[]>("list_media", { kind }),
   getMediaAudioTracks: (id: string, sessionId: string) =>
-    invoke<AudioTrack[]>("get_media_audio_tracks", { id, sessionId }),
+    invokeCommand<AudioTrack[]>("get_media_audio_tracks", { id, sessionId }),
   getAudioTrackPreview: (id: string, streamIndex: number, sessionId: string) =>
-    invoke<AudioPreviewResult>("get_audio_track_preview", { id, streamIndex, sessionId }),
+    invokeCommand<AudioPreviewResult>("get_audio_track_preview", { id, streamIndex, sessionId }),
   cancelAudioPreviewSession: (sessionId: string) =>
-    invoke<void>("cancel_audio_preview_session", { sessionId }),
+    invokeCommand<void>("cancel_audio_preview_session", { sessionId }),
   logClientEvent: (event: string, fields: Record<string, unknown>) =>
-    invoke<void>("log_client_event", { event, fields }),
+    invokeCommand<void>("log_client_event", { event, fields }),
   updateMediaTags: (id: string, tags: string[]) =>
-    invoke<MediaItem>("update_media_tags", { id, tags }),
+    invokeCommand<MediaItem>("update_media_tags", { id, tags }),
   updateMediaNotes: (id: string, notes?: string | null) =>
-    invoke<MediaItem>("update_media_notes", { id, notes }),
-  listCollections: () => invoke<Collection[]>("list_collections"),
+    invokeCommand<MediaItem>("update_media_notes", { id, notes }),
+  listCollections: () => invokeCommand<Collection[]>("list_collections"),
   listCollectionMedia: (collectionId: string) =>
-    invoke<MediaItem[]>("list_collection_media", { collectionId }),
-  createCollection: (name: string) => invoke<Collection[]>("create_collection", { name }),
+    invokeCommand<MediaItem[]>("list_collection_media", { collectionId }),
+  createCollection: (name: string) => invokeCommand<Collection[]>("create_collection", { name }),
   addToCollection: (collectionId: string, mediaId: string) =>
-    invoke<Collection[]>("add_to_collection", { collectionId, mediaId }),
-  createClip: (request: CreateClipRequest) => invoke<MediaItem>("create_clip", { request }),
-  revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
-  getStorageStats: () => invoke<StorageStats>("get_storage_stats"),
-  getCleanupCandidates: () => invoke<MediaItem[]>("get_cleanup_candidates"),
-  deleteRawFile: (id: string) => invoke<MediaItem[]>("delete_raw_file", { id })
+    invokeCommand<Collection[]>("add_to_collection", { collectionId, mediaId }),
+  createClip: (request: CreateClipRequest) => invokeCommand<MediaItem>("create_clip", { request }),
+  revealInExplorer: (id: string) => invokeCommand<void>("reveal_in_explorer", { id }),
+  getStorageStats: () => invokeCommand<StorageStats>("get_storage_stats"),
+  getCleanupCandidates: () => invokeCommand<MediaItem[]>("get_cleanup_candidates"),
+  deleteRawFile: (id: string) => invokeCommand<MediaItem[]>("delete_raw_file", { id })
 };
