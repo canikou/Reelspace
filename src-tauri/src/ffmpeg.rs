@@ -177,7 +177,13 @@ impl Ffmpeg {
         })
     }
 
-    pub fn thumbnail(&self, source: &Path, output_path: &Path, at_seconds: f64) -> AppResult<()> {
+    pub fn thumbnail_cancellable(
+        &self,
+        source: &Path,
+        output_path: &Path,
+        at_seconds: f64,
+        cancelled: Option<&AtomicBool>,
+    ) -> AppResult<()> {
         let ffmpeg = self.ffmpeg_path.as_ref().ok_or_else(|| {
             app_error(
                 ErrorCode::FfmpegUnavailable,
@@ -189,7 +195,12 @@ impl Ffmpeg {
         }
         let timestamp = format!("{:.3}", at_seconds.max(0.0));
         let command = thumbnail_command(ffmpeg, source, output_path, &timestamp);
-        let output = run_with_timeout(command, Duration::from_secs(30), "thumbnail generation")?;
+        let output = run_with_timeout_cancellable(
+            command,
+            Duration::from_secs(30),
+            "Thumbnail generation",
+            cancelled,
+        )?;
         if output.success {
             Ok(())
         } else {

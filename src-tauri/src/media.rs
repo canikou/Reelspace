@@ -4,7 +4,7 @@ use crate::ffmpeg::{Ffmpeg, TrimMethod};
 use crate::models::{CreateClipRequest, MediaItem, MediaKind};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +22,7 @@ pub struct ScanFolderResult {
     pub files_reprobed: usize,
     pub files_skipped: usize,
     pub traversal_errors: usize,
+    pub changed_path_keys: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +127,7 @@ pub fn scan_folder(
         files_reprobed: 0,
         files_skipped: 0,
         traversal_errors,
+        changed_path_keys: HashSet::new(),
     };
     for path in files {
         let key = normalized_path_key(&path);
@@ -144,6 +146,7 @@ pub fn scan_folder(
         match build_raw_item(&path, ffmpeg, database, thumbnail_dir) {
             Ok((item, cache_hit)) => {
                 result.files_changed += 1;
+                result.changed_path_keys.insert(key);
                 if cache_hit {
                     result.cached_probe_hits += 1;
                 } else {
@@ -241,6 +244,7 @@ pub fn ensure_thumbnail(
     duration_seconds: f64,
     ffmpeg: &Ffmpeg,
     thumbnail_dir: &Path,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> AppResult<Option<PathBuf>> {
     if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(user_error("thumbnail media identifier is invalid"));
@@ -250,13 +254,24 @@ pub fn ensure_thumbnail(
     if is_usable_thumbnail(&thumbnail_path) {
         return Ok(Some(thumbnail_path));
     }
+    let source_fingerprint = FileFingerprint::read(path)?;
 
     let _ = std::fs::remove_file(&temp_path);
 
     let mut last_error = None;
     for at in thumbnail_offsets(duration_seconds) {
-        match ffmpeg.thumbnail(path, &temp_path, at) {
+        match ffmpeg.thumbnail_cancellable(path, &temp_path, at, cancelled) {
             Ok(()) if is_usable_thumbnail(&temp_path) => {
+                let unchanged = FileFingerprint::read(path)
+                    .map(|current| current == source_fingerprint)
+                    .unwrap_or(false);
+                if !unchanged {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(app_error(
+                        ErrorCode::FileChanged,
+                        "The source recording changed during thumbnail generation",
+                    ));
+                }
                 if thumbnail_path.exists() {
                     std::fs::remove_file(&thumbnail_path)?;
                 }
@@ -268,6 +283,10 @@ pub fn ensure_thumbnail(
                     ErrorCode::ThumbnailGenerationFailed,
                     "FFmpeg produced an invalid thumbnail",
                 ));
+            }
+            Err(error) if error.code == ErrorCode::MediaProcessCancelled => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(error);
             }
             Err(error) => last_error = Some(error),
         }
@@ -375,8 +394,15 @@ fn build_item_base(
         .unwrap_or(modified_at);
     let id = stable_id(path);
     let probed = ffmpeg.probe(path)?;
-    let thumbnail =
-        ensure_thumbnail(&id, path, probed.duration_seconds, ffmpeg, thumbnail_dir).unwrap_or(None);
+    let thumbnail = ensure_thumbnail(
+        &id,
+        path,
+        probed.duration_seconds,
+        ffmpeg,
+        thumbnail_dir,
+        None,
+    )
+    .unwrap_or(None);
 
     Ok(MediaItem {
         id,

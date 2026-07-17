@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::fmt;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {

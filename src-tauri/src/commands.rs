@@ -139,10 +139,12 @@ pub async fn scan_sources(state: State<'_, AppState>) -> AppResult<Vec<MediaItem
     }
     let _scan_guard = ScanInFlightGuard(Arc::clone(&runtime.scan_in_flight));
     let job_runtime = runtime.clone();
-    run_media_job(&runtime, "library_scan", json!({}), None, move || {
+    let result = run_media_job(&runtime, "library_scan", json!({}), None, move || {
         scan_sources_inner(&job_runtime)
     })
-    .await
+    .await?;
+    start_thumbnail_worker(runtime);
+    Ok(result)
 }
 
 struct ScanInFlightGuard(Arc<AtomicBool>);
@@ -179,6 +181,7 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
     let mut files_skipped = 0;
     let mut files_missing = 0;
     let mut traversal_errors = 0;
+    let mut changed_path_keys = HashSet::new();
     for folder in &settings.source_folders {
         let source_id = stable_id(folder);
         match media::scan_folder(
@@ -199,6 +202,7 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
                 cached_probe_hits += result.cached_probe_hits;
                 files_skipped += result.files_skipped;
                 traversal_errors += result.traversal_errors;
+                changed_path_keys.extend(result.changed_path_keys);
                 scanned.extend(result.items);
             }
             Err(error) if error.code == ErrorCode::SourceUnavailable => {
@@ -220,13 +224,7 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
     let scanned_count = scanned.len();
     for item in &scanned {
         let key = media::normalized_path_key(Path::new(&item.path));
-        let unchanged = existing
-            .get(&key)
-            .map(|current| {
-                current.file_size == item.file_size && current.modified_at == item.modified_at
-            })
-            .unwrap_or(false);
-        if !unchanged {
+        if changed_path_keys.contains(&key) || !existing.contains_key(&key) {
             state.db.upsert_media(item)?;
         }
     }
@@ -240,16 +238,7 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
             files_missing += 1;
         }
     }
-    // Backfill thumbnails for unchanged records too. Older versions could
-    // import media successfully while silently leaving thumbnail_path empty.
-    let (repaired, failures) = repair_missing_thumbnails(state)?;
-    for failure in &failures {
-        state.telemetry.event(
-            "warn",
-            "thumbnail.generate.failed",
-            json!({ "error": failure }),
-        );
-    }
+    let queued_thumbnails = queue_missing_thumbnails(state, 0)?;
     state.telemetry.event(
         "info",
         "library.scan.finished",
@@ -266,8 +255,8 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
             "traversalErrors": traversal_errors,
             "coalescedEvents": state.scan_coalesced_events.swap(0, Ordering::AcqRel),
             "probeCacheEntries": state.db.probe_cache_count()?,
-            "repairedThumbnails": repaired,
-            "thumbnailFailures": failures.len(),
+            "queuedThumbnails": queued_thumbnails,
+            "pendingThumbnailJobs": state.db.thumbnail_job_count()?,
             "elapsedMs": started.elapsed().as_millis() as u64,
         }),
     );
@@ -442,34 +431,16 @@ pub fn log_client_event(
 }
 
 #[tauri::command]
-pub async fn repair_thumbnails(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
+pub fn repair_thumbnails(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
     let runtime = state.inner().clone();
-    let job_runtime = runtime.clone();
-    run_media_job(&runtime, "thumbnail_repair", json!({}), None, move || {
-        repair_thumbnails_inner(&job_runtime)
-    })
-    .await
-}
-
-fn repair_thumbnails_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
-    let _index_guard = state
-        .media_index_lock
-        .lock()
-        .map_err(|_| user_error("media index lock was poisoned"))?;
-    let (repaired, failures) = repair_missing_thumbnails(state)?;
-    state.telemetry.event(
+    let queued = queue_missing_thumbnails(&runtime, 100)?;
+    runtime.telemetry.event(
         "info",
-        "thumbnail.repair.finished",
-        json!({ "repaired": repaired, "failures": failures.len() }),
+        "thumbnail.repair.queued",
+        json!({ "queued": queued }),
     );
-    for failure in failures {
-        state.telemetry.event(
-            "warn",
-            "thumbnail.generate.failed",
-            json!({ "error": failure }),
-        );
-    }
-    state.db.list_media(None)
+    start_thumbnail_worker(runtime.clone());
+    runtime.db.list_media(None)
 }
 
 #[tauri::command]
@@ -818,10 +789,9 @@ fn belongs_to_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path_is_within(path, root))
 }
 
-fn repair_missing_thumbnails(state: &AppState) -> AppResult<(usize, Vec<String>)> {
+fn queue_missing_thumbnails(state: &AppState, priority: i64) -> AppResult<usize> {
     let items = state.db.list_media(None)?;
-    let mut repaired = 0;
-    let mut failures = Vec::new();
+    let mut queued = 0;
     for item in items {
         let current = item.thumbnail_path.as_ref().map(Path::new);
         let needs_thumbnail = current
@@ -833,28 +803,136 @@ fn repair_missing_thumbnails(state: &AppState) -> AppResult<(usize, Vec<String>)
             continue;
         }
 
+        if let Ok(fingerprint) = media::FileFingerprint::read(Path::new(&item.path)) {
+            state
+                .db
+                .queue_thumbnail_job(&item, &fingerprint, priority)?;
+            queued += 1;
+        }
+    }
+    Ok(queued)
+}
+
+pub(crate) fn start_thumbnail_worker(state: AppState) {
+    if !state.thumbnail_scheduler.try_start() {
+        return;
+    }
+    let scheduler = Arc::clone(&state.thumbnail_scheduler);
+    tauri::async_runtime::spawn(async move {
+        let worker_state = state.clone();
+        let outcome =
+            tauri::async_runtime::spawn_blocking(move || run_thumbnail_worker(&worker_state)).await;
+        if let Err(error) = outcome {
+            state.telemetry.event(
+                "error",
+                "thumbnail.worker.failed",
+                json!({ "error": error.to_string() }),
+            );
+        }
+        scheduler.finish();
+    });
+}
+
+fn run_thumbnail_worker(state: &AppState) -> AppResult<()> {
+    state.telemetry.event(
+        "info",
+        "thumbnail.worker.started",
+        json!({ "concurrency": 1 }),
+    );
+    let mut completed = 0_u64;
+    let mut failed = 0_u64;
+    while !state
+        .thumbnail_scheduler
+        .cancelled()
+        .load(Ordering::Acquire)
+    {
+        let Some(job) = state.db.claim_thumbnail_job()? else {
+            break;
+        };
+        let item = match state.db.get_media(&job.media_id) {
+            Ok(item) => item,
+            Err(_) => continue,
+        };
+        let source = PathBuf::from(&job.source_path);
+        let fingerprint = match media::FileFingerprint::read(&source) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                state.db.fail_thumbnail_job(
+                    &job.media_id,
+                    job.attempts,
+                    error_code_name(error.code),
+                )?;
+                failed += 1;
+                continue;
+            }
+        };
+        if fingerprint.token() != job.source_fingerprint {
+            state.db.queue_thumbnail_job(&item, &fingerprint, 100)?;
+            continue;
+        }
         match media::ensure_thumbnail(
-            &item.id,
-            Path::new(&item.path),
-            item.duration_seconds,
+            &job.media_id,
+            &source,
+            job.duration_seconds,
             &state.ffmpeg,
             &state.thumbnail_dir,
+            Some(state.thumbnail_scheduler.cancelled()),
         ) {
-            Ok(Some(thumbnail_path)) => {
-                let thumbnail = thumbnail_path.to_string_lossy().to_string();
-                state.db.update_thumbnail(&item.id, Some(&thumbnail))?;
-                repaired += 1;
+            Ok(Some(thumbnail)) => {
+                state
+                    .db
+                    .finish_thumbnail_job(&job.media_id, &thumbnail.to_string_lossy())?;
+                completed += 1;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                state.db.fail_thumbnail_job(
+                    &job.media_id,
+                    job.attempts,
+                    "thumbnailGenerationFailed",
+                )?;
+                failed += 1;
+            }
             Err(error) => {
-                failures.push(format!(
-                    "thumbnail generation failed for {}: {error}",
-                    item.filename
-                ));
+                state.db.fail_thumbnail_job(
+                    &job.media_id,
+                    job.attempts,
+                    error_code_name(error.code),
+                )?;
+                failed += 1;
+                state.telemetry.event(
+                    if error.code == ErrorCode::MediaProcessCancelled {
+                        "info"
+                    } else {
+                        "warn"
+                    },
+                    "thumbnail.generate.failed",
+                    json!({
+                        "mediaId": job.media_id,
+                        "code": error.code,
+                        "attempt": job.attempts,
+                    }),
+                );
             }
         }
     }
-    Ok((repaired, failures))
+    state.telemetry.event(
+        "info",
+        "thumbnail.worker.finished",
+        json!({ "completed": completed, "failed": failed }),
+    );
+    Ok(())
+}
+
+fn error_code_name(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::FileChanged => "fileChanged",
+        ErrorCode::FileNotFound => "fileNotFound",
+        ErrorCode::SourceUnavailable => "sourceUnavailable",
+        ErrorCode::FfmpegUnavailable => "ffmpegUnavailable",
+        ErrorCode::MediaProcessCancelled => "mediaProcessCancelled",
+        ErrorCode::MediaProcessTimeout => "mediaProcessTimeout",
+        _ => "thumbnailGenerationFailed",
+    }
 }
 
 fn prune_audio_preview_cache(cache_dir: &Path, keep: &Path, state: &AppState) {

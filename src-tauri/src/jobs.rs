@@ -15,6 +15,42 @@ pub struct MediaJobPermit {
     queue: Arc<MediaJobQueue>,
 }
 
+pub struct ThumbnailScheduler {
+    running: AtomicBool,
+    shutdown: AtomicBool,
+}
+
+impl Default for ThumbnailScheduler {
+    fn default() -> Self {
+        Self {
+            running: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
+        }
+    }
+}
+
+impl ThumbnailScheduler {
+    pub fn try_start(&self) -> bool {
+        !self.shutdown.load(Ordering::Acquire)
+            && self
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+
+    pub fn finish(&self) {
+        self.running.store(false, Ordering::Release);
+    }
+
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
+    pub fn cancelled(&self) -> &AtomicBool {
+        &self.shutdown
+    }
+}
+
 impl MediaJobQueue {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -162,5 +198,18 @@ mod tests {
         let coordinator = PreviewCoordinator::default();
         assert!(!coordinator.cancel_session("late-session"));
         assert!(coordinator.session("late-session").load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn thumbnail_scheduler_allows_only_one_worker_and_stays_cancelled() {
+        let scheduler = ThumbnailScheduler::default();
+        assert!(scheduler.try_start());
+        assert!(!scheduler.try_start());
+        scheduler.finish();
+        assert!(scheduler.try_start());
+        scheduler.request_shutdown();
+        scheduler.finish();
+        assert!(!scheduler.try_start());
+        assert!(scheduler.cancelled().load(Ordering::Acquire));
     }
 }

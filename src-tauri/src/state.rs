@@ -1,7 +1,7 @@
 use crate::db::Database;
 use crate::error::AppResult;
 use crate::ffmpeg::Ffmpeg;
-use crate::jobs::{MediaJobQueue, PreviewCoordinator};
+use crate::jobs::{MediaJobQueue, PreviewCoordinator, ThumbnailScheduler};
 use crate::telemetry::Telemetry;
 use directories::ProjectDirs;
 use std::fs;
@@ -25,6 +25,7 @@ pub struct AppState {
     pub media_jobs: Arc<MediaJobQueue>,
     pub export_jobs: Arc<MediaJobQueue>,
     pub preview_coordinator: Arc<PreviewCoordinator>,
+    pub thumbnail_scheduler: Arc<ThumbnailScheduler>,
     pub telemetry: Arc<Telemetry>,
 }
 
@@ -55,6 +56,7 @@ impl AppState {
             media_jobs: Arc::new(MediaJobQueue::new(1)),
             export_jobs: Arc::new(MediaJobQueue::new(1)),
             preview_coordinator: Arc::new(PreviewCoordinator::default()),
+            thumbnail_scheduler: Arc::new(ThumbnailScheduler::default()),
             telemetry,
         })
     }

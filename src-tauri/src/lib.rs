@@ -15,7 +15,7 @@ use state::AppState;
 use tauri::Manager;
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = AppState::new(app.handle())?;
@@ -29,7 +29,9 @@ pub fn run() {
                     "exportJobCapacity": 1,
                 }),
             );
+            let worker_state = state.clone();
             app.manage(state);
+            start_thumbnail_worker(worker_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -54,6 +56,17 @@ pub fn run() {
             get_cleanup_candidates,
             delete_raw_file
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Reelspace");
+        .build(tauri::generate_context!())
+        .expect("failed to build Reelspace");
+    app.run(|app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+        ) {
+            app_handle
+                .state::<AppState>()
+                .thumbnail_scheduler
+                .request_shutdown();
+        }
+    });
 }

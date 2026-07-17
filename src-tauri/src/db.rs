@@ -10,7 +10,15 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
-const DATABASE_SCHEMA_VERSION: i64 = 2;
+pub struct ThumbnailJob {
+    pub media_id: String,
+    pub source_path: String,
+    pub duration_seconds: f64,
+    pub source_fingerprint: String,
+    pub attempts: u32,
+}
+
+const DATABASE_SCHEMA_VERSION: i64 = 3;
 pub const PROBE_SCHEMA_VERSION: i64 = 1;
 
 impl Database {
@@ -123,6 +131,22 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_probe_cache_fingerprint
               ON probe_cache(path_key, file_size, modified_ns, probe_version);
+
+            CREATE TABLE IF NOT EXISTS thumbnail_jobs (
+              media_id TEXT PRIMARY KEY NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              source_fingerprint TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'retry', 'permanent')),
+              attempts INTEGER NOT NULL DEFAULT 0,
+              priority INTEGER NOT NULL DEFAULT 0,
+              next_attempt_at INTEGER NOT NULL DEFAULT 0,
+              error_code TEXT,
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_thumbnail_jobs_ready
+              ON thumbnail_jobs(state, next_attempt_at, priority DESC, updated_at);
+
+            UPDATE thumbnail_jobs SET state = 'queued' WHERE state = 'running';
             "#,
             )
             .map_err(|error| {
@@ -219,6 +243,128 @@ impl Database {
         let conn = self.conn()?;
         let count: i64 =
             conn.query_row("SELECT COUNT(*) FROM probe_cache", [], |row| row.get(0))?;
+        Ok(count.max(0) as u64)
+    }
+
+    pub fn queue_thumbnail_job(
+        &self,
+        item: &MediaItem,
+        fingerprint: &FileFingerprint,
+        priority: i64,
+    ) -> AppResult<()> {
+        let conn = self.conn()?;
+        let source_fingerprint = fingerprint.token();
+        conn.execute(
+            "INSERT INTO thumbnail_jobs (
+               media_id, source_fingerprint, state, attempts, priority,
+               next_attempt_at, error_code, updated_at
+             ) VALUES (?1, ?2, 'queued', 0, ?3, 0, NULL, ?4)
+             ON CONFLICT(media_id) DO UPDATE SET
+               source_fingerprint = excluded.source_fingerprint,
+               state = CASE
+                 WHEN thumbnail_jobs.source_fingerprint != excluded.source_fingerprint THEN 'queued'
+                 WHEN thumbnail_jobs.state = 'permanent' THEN thumbnail_jobs.state
+                 ELSE 'queued'
+               END,
+               attempts = CASE
+                 WHEN thumbnail_jobs.source_fingerprint != excluded.source_fingerprint THEN 0
+                 ELSE thumbnail_jobs.attempts
+               END,
+               priority = MAX(thumbnail_jobs.priority, excluded.priority),
+               next_attempt_at = CASE
+                 WHEN thumbnail_jobs.source_fingerprint != excluded.source_fingerprint THEN 0
+                 ELSE thumbnail_jobs.next_attempt_at
+               END,
+               updated_at = excluded.updated_at",
+            params![
+                item.id,
+                source_fingerprint,
+                priority.clamp(0, 100),
+                Utc::now().timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn claim_thumbnail_job(&self) -> AppResult<Option<ThumbnailJob>> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().timestamp();
+        let job = transaction
+            .query_row(
+                "SELECT j.media_id, m.path, m.duration_seconds, j.source_fingerprint, j.attempts
+                 FROM thumbnail_jobs j
+                 INNER JOIN media m ON m.id = j.media_id
+                 WHERE j.state IN ('queued', 'retry') AND j.next_attempt_at <= ?1
+                 ORDER BY j.priority DESC, j.updated_at ASC
+                 LIMIT 1",
+                [now],
+                |row| {
+                    Ok(ThumbnailJob {
+                        media_id: row.get(0)?,
+                        source_path: row.get(1)?,
+                        duration_seconds: row.get(2)?,
+                        source_fingerprint: row.get(3)?,
+                        attempts: row.get::<_, i64>(4)?.max(0) as u32 + 1,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(job) = &job {
+            transaction.execute(
+                "UPDATE thumbnail_jobs
+                 SET state = 'running', attempts = ?1, updated_at = ?2
+                 WHERE media_id = ?3",
+                params![job.attempts as i64, now, job.media_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    pub fn finish_thumbnail_job(&self, media_id: &str, thumbnail_path: &str) -> AppResult<()> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE media SET thumbnail_path = ?1 WHERE id = ?2",
+            params![thumbnail_path, media_id],
+        )?;
+        transaction.execute("DELETE FROM thumbnail_jobs WHERE media_id = ?1", [media_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_thumbnail_job(
+        &self,
+        media_id: &str,
+        attempts: u32,
+        error_code: &str,
+    ) -> AppResult<()> {
+        let permanent = attempts >= 3;
+        let backoff_seconds = 2_i64.pow(attempts.min(6));
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE thumbnail_jobs
+             SET state = ?1, next_attempt_at = ?2, error_code = ?3, updated_at = ?4
+             WHERE media_id = ?5",
+            params![
+                if permanent { "permanent" } else { "retry" },
+                Utc::now().timestamp() + backoff_seconds,
+                error_code,
+                Utc::now().timestamp(),
+                media_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn thumbnail_job_count(&self) -> AppResult<u64> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM thumbnail_jobs WHERE state != 'permanent'",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(count.max(0) as u64)
     }
 
@@ -345,15 +491,6 @@ impl Database {
         conn.execute(
             "UPDATE media SET notes = ?1 WHERE id = ?2",
             params![notes, id],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_thumbnail(&self, id: &str, thumbnail_path: Option<&str>) -> AppResult<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE media SET thumbnail_path = ?1 WHERE id = ?2",
-            params![thumbnail_path, id],
         )?;
         Ok(())
     }
@@ -634,6 +771,83 @@ mod tests {
         db.delete_media(&media.id).expect("delete");
         assert_eq!(db.probe_cache_count().expect("cache count"), 0);
         drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn thumbnail_jobs_are_deduplicated_and_retry_only_after_fingerprint_changes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-thumbnail-jobs-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        let media = item("C:\\captures\\thumb.mp4", MediaKind::Raw);
+        db.upsert_media(&media).expect("media");
+        let fingerprint = FileFingerprint {
+            path_key: crate::media::normalized_path_key(std::path::Path::new(&media.path)),
+            size: media.file_size,
+            modified_ns: 2,
+        };
+        db.queue_thumbnail_job(&media, &fingerprint, 0)
+            .expect("queue");
+        db.queue_thumbnail_job(&media, &fingerprint, 100)
+            .expect("duplicate queue");
+        assert_eq!(db.thumbnail_job_count().expect("count"), 1);
+        let job = db.claim_thumbnail_job().expect("claim").expect("job");
+        assert_eq!(job.attempts, 1);
+        db.fail_thumbnail_job(&media.id, 3, "ffmpegFailed")
+            .expect("permanent failure");
+        assert_eq!(db.thumbnail_job_count().expect("permanent count"), 0);
+        db.queue_thumbnail_job(&media, &fingerprint, 100)
+            .expect("same fingerprint remains exhausted");
+        assert!(db.claim_thumbnail_job().expect("claim exhausted").is_none());
+
+        let changed = FileFingerprint {
+            size: fingerprint.size + 1,
+            ..fingerprint
+        };
+        db.queue_thumbnail_job(&media, &changed, 100)
+            .expect("changed source queues again");
+        assert_eq!(
+            db.claim_thumbnail_job()
+                .expect("claim changed")
+                .expect("changed job")
+                .attempts,
+            1
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn running_thumbnail_jobs_resume_after_database_reopen() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-thumbnail-resume-{nonce}.sqlite"));
+        let media = item("C:\\captures\\resume.mp4", MediaKind::Raw);
+        let fingerprint = FileFingerprint {
+            path_key: crate::media::normalized_path_key(std::path::Path::new(&media.path)),
+            size: media.file_size,
+            modified_ns: 2,
+        };
+        {
+            let db = Database::open(path.clone()).expect("database");
+            db.upsert_media(&media).expect("media");
+            db.queue_thumbnail_job(&media, &fingerprint, 0)
+                .expect("queue");
+            assert!(db.claim_thumbnail_job().expect("claim").is_some());
+        }
+        let reopened = Database::open(path.clone()).expect("reopen");
+        let resumed = reopened
+            .claim_thumbnail_job()
+            .expect("resume claim")
+            .expect("resumed job");
+        assert_eq!(resumed.media_id, media.id);
+        assert_eq!(resumed.attempts, 2);
+        drop(reopened);
         let _ = std::fs::remove_file(path);
     }
 }
