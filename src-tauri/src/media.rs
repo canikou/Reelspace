@@ -1,8 +1,7 @@
 use crate::error::{user_error, AppResult};
-use crate::ffmpeg::Ffmpeg;
+use crate::ffmpeg::{Ffmpeg, TrimMethod};
 use crate::models::{CreateClipRequest, MediaItem, MediaKind};
 use chrono::Utc;
-use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -37,7 +36,7 @@ pub fn scan_folder(
         .collect::<Vec<_>>();
 
     let items = files
-        .par_iter()
+        .iter()
         .filter_map(|path| {
             let key = normalized_path_key(path);
             if let Some(item) = existing.get(&key) {
@@ -57,7 +56,7 @@ pub fn build_clip_item(
     output_path: PathBuf,
     ffmpeg: &Ffmpeg,
     thumbnail_dir: &Path,
-) -> AppResult<MediaItem> {
+) -> AppResult<(MediaItem, TrimMethod)> {
     let stem = output_path
         .file_stem()
         .and_then(OsStr::to_str)
@@ -77,10 +76,13 @@ pub fn build_clip_item(
             .as_deref()
             .unwrap_or_default(),
     );
-    if let Err(error) = trim_result {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error);
-    }
+    let trim_method = match trim_result {
+        Ok(method) => method,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+    };
     let usable = temp_path
         .metadata()
         .map(|metadata| metadata.is_file() && metadata.len() > 0)
@@ -109,7 +111,7 @@ pub fn build_clip_item(
     item.notes = request.title.clone();
     item.trim_start_seconds = Some(request.start_seconds);
     item.trim_end_seconds = Some(request.end_seconds);
-    Ok(item)
+    Ok((item, trim_method))
 }
 
 pub fn ensure_thumbnail(

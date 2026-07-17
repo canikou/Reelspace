@@ -235,13 +235,20 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent-solid); o
 .track-controls { display: grid; gap: 7px; padding-top: 2px; }
 .track-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; }
 .track-heading > div { display: flex; align-items: center; gap: 7px; }
+.track-heading-actions { justify-content: flex-end; }
+.track-progress { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.track-progress.ready { color: var(--success); }
+.track-progress-rail { height: 2px; overflow: hidden; border-radius: 999px; background: var(--surface-hover); }
+.track-progress-rail span { display: block; height: 100%; border-radius: inherit; background: var(--accent-solid); transition: width 180ms ease; }
 .proxy-volume button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; color: var(--muted); background: var(--surface); }
 .proxy-volume input { width: 96px; padding: 0; accent-color: var(--accent-solid); }
 .track-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 7px; }
 .track-list button { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 40px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--subtle); background: var(--surface); text-align: left; }
-.track-list button.enabled { border-color: #3f735f; color: var(--success); background: var(--success-soft); }
+.track-list button.enabled { border-color: var(--accent-solid); color: var(--accent); background: var(--accent-soft); }
 .track-list button span { overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.track-list button small { color: var(--muted); font-size: 9px; }
+.track-list button small { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 9px; }
+.track-list button.status-ready small { color: var(--success); }
+.track-list button.status-error small { color: var(--warning); }
 .trim-actions { display: flex; justify-content: center; padding-top: 2px; }
 .setup-modal { display: grid; width: min(520px, 92vw); }
 .setup-body { display: flex; justify-content: flex-end; gap: 8px; padding: 14px; }

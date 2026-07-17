@@ -59,6 +59,7 @@ export interface Collection {
 
 export interface CreateClipRequest {
   sourceId: string;
+  sessionId?: string | null;
   startSeconds: number;
   endSeconds: number;
   title?: string | null;
@@ -72,4 +73,12 @@ export interface AudioTrack {
   language?: string | null;
   title?: string | null;
   isDefault: boolean;
+}
+
+export interface AudioPreviewResult {
+  path: string;
+  cacheHit: boolean;
+  method: "cache" | "copy" | "transcode";
+  elapsedMs: number;
+  bytes: number;
 }

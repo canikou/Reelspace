@@ -1,16 +1,22 @@
-import { ChevronLeft, ChevronRight, Save, Volume2, VolumeX, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, LoaderCircle, Save, Volume2, VolumeX, X } from "lucide-react";
 import { type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, mediaSrc } from "../lib/api";
 import { formatDuration } from "../lib/format";
 import type { AudioTrack, MediaItem } from "../lib/types";
 
 type ActivePoint = "start" | "end";
+type PreviewPhase = "queued" | "preparing" | "ready" | "error";
+type PreviewStatus = { phase: PreviewPhase; method?: "cache" | "copy" | "transcode"; elapsedMs?: number };
 type VideoWithAudioTracks = HTMLVideoElement & {
   audioTracks?: { length: number; [index: number]: { enabled: boolean } };
 };
 
 const MIN_SPAN = 0.05;
 const NUDGE_SECONDS = 0.1;
+
+function createTrimSessionId() {
+  return globalThis.crypto?.randomUUID?.() ?? `trim-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 export function TrimModal({
   item,
@@ -23,6 +29,12 @@ export function TrimModal({
 }) {
   const videoRef = useRef<VideoWithAudioTracks | null>(null);
   const audioRefs = useRef<Record<number, HTMLAudioElement | null>>({});
+  const mountedRef = useRef(true);
+  const generationRef = useRef(0);
+  const openedAtRef = useRef(performance.now());
+  const metadataLoggedRef = useRef(false);
+  const canPlayLoggedRef = useRef(false);
+  const sessionIdRef = useRef(createTrimSessionId());
   const [duration, setDuration] = useState(Math.max(MIN_SPAN, item.durationSeconds || 1));
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(Math.max(MIN_SPAN, item.durationSeconds || 1));
@@ -33,7 +45,7 @@ export function TrimModal({
   const [enabledTracks, setEnabledTracks] = useState<number[]>([]);
   const [previewSources, setPreviewSources] = useState<Record<number, string>>({});
   const [previewErrors, setPreviewErrors] = useState<Record<number, string>>({});
-  const [previewsSettled, setPreviewsSettled] = useState(false);
+  const [previewStatus, setPreviewStatus] = useState<Record<number, PreviewStatus>>({});
   const [previewMuted, setPreviewMuted] = useState(false);
   const [previewVolume, setPreviewVolume] = useState(1);
   const [title, setTitle] = useState("");
@@ -43,31 +55,112 @@ export function TrimModal({
   const [videoError, setVideoError] = useState<string | null>(null);
   const src = mediaSrc(item.path);
   const span = useMemo(() => Math.max(0, end - start), [end, start]);
+  function logTrimEvent(event: string, fields: Record<string, unknown> = {}) {
+    void api.logClientEvent(event, {
+      sessionId: sessionIdRef.current,
+      mediaId: item.id,
+      ...fields
+    }).catch(() => undefined);
+  }
 
   useEffect(() => {
+    const sessionId = createTrimSessionId();
+    sessionIdRef.current = sessionId;
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+    mountedRef.current = true;
     let active = true;
-    api.getMediaAudioTracks(item.id)
-      .then(async (next) => {
-        if (!active) return;
+    const probeStarted = performance.now();
+    openedAtRef.current = probeStarted;
+    metadataLoggedRef.current = false;
+    canPlayLoggedRef.current = false;
+    setTracks([]);
+    setTracksLoading(true);
+    setEnabledTracks([]);
+    setPreviewSources({});
+    setPreviewErrors({});
+    setPreviewStatus({});
+    setTrackError(null);
+    logTrimEvent("trim.open", {
+      sourceBytes: item.fileSize,
+      sourceDurationSeconds: item.durationSeconds
+    });
+    api.getMediaAudioTracks(item.id, sessionId)
+      .then((next) => {
+        if (!active || generationRef.current !== generation) return;
         setTracks(next);
         setEnabledTracks(next.map((track) => track.index));
-        await Promise.all(next.map(async (track) => {
+        setTracksLoading(false);
+        setPreviewStatus(Object.fromEntries(next.map((track) => [track.index, { phase: "queued" as const }])));
+        logTrimEvent("audio.probe.ready", {
+          trackCount: next.length,
+          elapsedMs: Math.round(performance.now() - probeStarted)
+        });
+        const previewJobs = next.map(async (track) => {
+          if (!active || generationRef.current !== generation) return;
+          setPreviewStatus((current) => ({ ...current, [track.index]: { phase: "preparing" } }));
+          const previewStarted = performance.now();
+          logTrimEvent("audio.preview.request", {
+            streamIndex: track.index,
+            codec: track.codec,
+            channels: track.channels
+          });
           try {
-            const path = await api.getAudioTrackPreview(item.id, track.index);
-            if (active) {
-              setPreviewSources((current) => ({ ...current, [track.index]: mediaSrc(path) ?? "" }));
+            const result = await api.getAudioTrackPreview(item.id, track.index, sessionId);
+            if (active && generationRef.current === generation) {
+              setPreviewSources((current) => ({ ...current, [track.index]: mediaSrc(result.path) ?? "" }));
+              setPreviewStatus((current) => ({
+                ...current,
+                [track.index]: { phase: "ready", method: result.method, elapsedMs: result.elapsedMs }
+              }));
+              logTrimEvent("audio.preview.ready", {
+                streamIndex: track.index,
+                method: result.method,
+                cacheHit: result.cacheHit,
+                backendElapsedMs: result.elapsedMs,
+                clientElapsedMs: Math.round(performance.now() - previewStarted),
+                outputBytes: result.bytes
+              });
             }
           } catch (reason) {
-            if (active) {
+            if (active && generationRef.current === generation && !String(reason).toLowerCase().includes("cancelled")) {
               setPreviewErrors((current) => ({ ...current, [track.index]: String(reason) }));
+              setPreviewStatus((current) => ({ ...current, [track.index]: { phase: "error" } }));
+              logTrimEvent("audio.preview.error", {
+                streamIndex: track.index,
+                elapsedMs: Math.round(performance.now() - previewStarted),
+                error: String(reason)
+              });
             }
           }
-        }));
-        if (active) setPreviewsSettled(true);
+        });
+        void Promise.allSettled(previewJobs).then(() => {
+          if (!active || generationRef.current !== generation) return;
+          logTrimEvent("audio.preview.settled", {
+            trackCount: next.length,
+            elapsedMs: Math.round(performance.now() - probeStarted)
+          });
+        });
       })
-      .catch((reason) => active && setTrackError(String(reason)))
-      .finally(() => active && setTracksLoading(false));
-    return () => { active = false; };
+      .catch((reason) => {
+        if (!active || generationRef.current !== generation) return;
+        setTrackError(String(reason));
+        setTracksLoading(false);
+        logTrimEvent("audio.probe.error", {
+          elapsedMs: Math.round(performance.now() - probeStarted),
+          error: String(reason)
+        });
+      });
+    return () => {
+      active = false;
+      mountedRef.current = false;
+      generationRef.current += 1;
+      for (const audio of Object.values(audioRefs.current)) audio?.pause();
+      void api.cancelAudioPreviewSession(sessionId).catch(() => undefined);
+      logTrimEvent("trim.close", {
+        elapsedMs: Math.round(performance.now() - openedAtRef.current)
+      });
+    };
   }, [item.id]);
 
   useEffect(() => {
@@ -80,11 +173,11 @@ export function TrimModal({
 
   useEffect(() => {
     applyAudioPreview(enabledTracks);
-  }, [enabledTracks, previewMuted, previewSources, previewVolume, previewsSettled, tracks]);
+  }, [enabledTracks, previewMuted, previewSources, previewVolume, tracks]);
 
-  const proxiesActive = tracks.length > 0
-    && previewsSettled
-    && tracks.some((track) => previewSources[track.index]);
+  const proxiesActive = enabledTracks.length > 0
+    && enabledTracks.every((index) => Boolean(previewSources[index]));
+  const readyPreviewCount = tracks.filter((track) => previewStatus[track.index]?.phase === "ready").length;
 
   function applyAudioPreview(enabled: number[]) {
     const video = videoRef.current;
@@ -105,10 +198,19 @@ export function TrimModal({
   function syncAudio(forceSeek: boolean) {
     const video = videoRef.current;
     if (!video) return;
+    if (!proxiesActive) {
+      for (const audio of Object.values(audioRefs.current)) audio?.pause();
+      return;
+    }
     for (const track of tracks) {
       const audio = audioRefs.current[track.index];
       if (!audio) continue;
-      audio.muted = previewMuted || !enabledTracks.includes(track.index);
+      const enabled = enabledTracks.includes(track.index);
+      audio.muted = previewMuted || !enabled;
+      if (!enabled) {
+        audio.pause();
+        continue;
+      }
       audio.volume = previewVolume;
       audio.playbackRate = video.playbackRate;
       if (forceSeek || Math.abs(audio.currentTime - video.currentTime) > 0.12) {
@@ -166,19 +268,36 @@ export function TrimModal({
   async function saveClip() {
     setBusy(true);
     setError(null);
+    const saveStarted = performance.now();
+    logTrimEvent("trim.save.started", {
+      startSeconds: start,
+      endSeconds: end,
+      selectedDurationSeconds: span,
+      audioTrackCount: enabledTracks.length
+    });
     try {
       const created = await api.createClip({
         sourceId: item.id,
+        sessionId: sessionIdRef.current,
         startSeconds: start,
         endSeconds: end,
         title: title || null,
         enabledAudioTrackIndices: enabledTracks
       });
+      logTrimEvent("trim.save.finished", {
+        elapsedMs: Math.round(performance.now() - saveStarted),
+        outputBytes: created.fileSize,
+        outputDurationSeconds: created.durationSeconds
+      });
       await onCreated(created);
     } catch (reason) {
-      setError(String(reason));
+      if (mountedRef.current) setError(String(reason));
+      logTrimEvent("trim.save.error", {
+        elapsedMs: Math.round(performance.now() - saveStarted),
+        error: String(reason)
+      });
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   }
 
@@ -204,6 +323,13 @@ export function TrimModal({
             setStart((current) => Math.min(Math.max(0, current), nextDuration - MIN_SPAN));
             setEnd((current) => Math.max(MIN_SPAN, Math.min(current, nextDuration)));
             applyAudioPreview(enabledTracks);
+            if (!metadataLoggedRef.current) {
+              metadataLoggedRef.current = true;
+              logTrimEvent("trim.video.metadata_ready", {
+                elapsedMs: Math.round(performance.now() - openedAtRef.current),
+                measuredDurationSeconds: nextDuration
+              });
+            }
           }}
           onPlay={() => syncAudio(true)}
           onPause={() => syncAudio(false)}
@@ -216,7 +342,15 @@ export function TrimModal({
             syncAudio(false);
           }}
           onTimeUpdate={(event) => { setPlayhead(event.currentTarget.currentTime); syncAudio(false); }}
-          onCanPlay={() => setVideoError(null)}
+          onCanPlay={() => {
+            setVideoError(null);
+            if (!canPlayLoggedRef.current) {
+              canPlayLoggedRef.current = true;
+              logTrimEvent("trim.video.can_play", {
+                elapsedMs: Math.round(performance.now() - openedAtRef.current)
+              });
+            }
+          }}
           onError={() => setVideoError("This file could not be opened by the embedded player. FFmpeg may still be able to trim it.")}
         />
         <div className="audio-proxies" aria-hidden="true">
@@ -225,7 +359,7 @@ export function TrimModal({
               key={track.index}
               ref={(element) => { audioRefs.current[track.index] = element; }}
               src={previewSources[track.index]}
-              preload="auto"
+              preload="metadata"
             />
           ) : null)}
         </div>
@@ -299,25 +433,39 @@ export function TrimModal({
             <section className="track-controls" aria-label="Audio tracks">
               <div className="track-heading">
                 <div><Volume2 size={15} /><span>Audio tracks</span></div>
-                {proxiesActive ? (
-                  <div className="proxy-volume">
-                    <button onClick={() => setPreviewMuted((current) => !current)} aria-label={previewMuted ? "Unmute track preview" : "Mute track preview"} aria-pressed={previewMuted}>
-                      {previewMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                    </button>
-                    <input aria-label="Track preview volume" type="range" min="0" max="1" step="0.05" value={previewVolume} onChange={(event) => setPreviewVolume(Number(event.target.value))} />
-                  </div>
-                ) : null}
+                <div className="track-heading-actions">
+                  <span className={readyPreviewCount === tracks.length ? "track-progress ready" : "track-progress"} aria-live="polite">
+                    {readyPreviewCount === tracks.length ? <Check size={13} /> : <LoaderCircle size={13} className="spin" />}
+                    {readyPreviewCount}/{tracks.length}
+                  </span>
+                  {proxiesActive ? (
+                    <div className="proxy-volume">
+                      <button onClick={() => setPreviewMuted((current) => !current)} aria-label={previewMuted ? "Unmute track preview" : "Mute track preview"} aria-pressed={previewMuted}>
+                        {previewMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                      </button>
+                      <input aria-label="Track preview volume" type="range" min="0" max="1" step="0.05" value={previewVolume} onChange={(event) => setPreviewVolume(Number(event.target.value))} />
+                    </div>
+                  ) : null}
+                </div>
               </div>
-              <div className="track-list" aria-live="polite">
+              <div className="track-progress-rail" aria-hidden="true">
+                <span style={{ width: `${tracks.length ? (readyPreviewCount / tracks.length) * 100 : 0}%` }} />
+              </div>
+              <div className="track-list">
                 {tracks.map((track, position) => {
                   const enabled = enabledTracks.includes(track.index);
+                  const status = previewStatus[track.index]?.phase ?? "queued";
+                  const method = previewStatus[track.index]?.method;
+                  const details = [track.codec?.toUpperCase(), track.channels ? `${track.channels}ch` : null].filter(Boolean).join(" · ");
                   return (
-                    <button key={track.index} className={enabled ? "enabled" : ""} onClick={() => toggleTrack(track.index)} aria-pressed={enabled}>
+                    <button key={track.index} className={`${enabled ? "enabled" : ""} status-${status}`} onClick={() => toggleTrack(track.index)} aria-pressed={enabled}>
                       {enabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
                       <span>{track.title || `Track ${position + 1}`}</span>
-                      <small>{previewSources[track.index]
-                        ? [track.codec?.toUpperCase(), track.channels ? `${track.channels}ch` : null].filter(Boolean).join(" · ")
-                        : previewErrors[track.index] ? "Preview unavailable" : "Preparing…"}</small>
+                      <small>
+                        {status === "preparing" ? <LoaderCircle size={11} className="spin" /> : null}
+                        {status === "ready" ? <Check size={11} /> : null}
+                        {status === "error" ? "Unavailable" : status === "queued" ? "Queued" : status === "preparing" ? "Preparing" : `${method === "cache" ? "Cached" : method === "copy" ? "Copied" : "Ready"}${details ? ` · ${details}` : ""}`}
+                      </small>
                     </button>
                   );
                 })}

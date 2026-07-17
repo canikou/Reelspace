@@ -3,10 +3,12 @@ mod db;
 mod error;
 mod explorer;
 mod ffmpeg;
+mod jobs;
 mod media;
 mod models;
 mod state;
 mod storage;
+mod telemetry;
 
 use commands::*;
 use state::AppState;
@@ -19,6 +21,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let state = AppState::new(app.handle())?;
+            state.telemetry.event(
+                "info",
+                "app.started",
+                serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "backgroundJobCapacity": 1,
+                    "interactiveJobCapacity": 1,
+                    "exportJobCapacity": 1,
+                }),
+            );
             app.manage(state);
             Ok(())
         })
@@ -29,6 +41,8 @@ pub fn run() {
             list_media,
             get_media_audio_tracks,
             get_audio_track_preview,
+            cancel_audio_preview_session,
+            log_client_event,
             repair_thumbnails,
             update_media_tags,
             update_media_notes,

@@ -1,14 +1,52 @@
 use crate::error::{user_error, AppResult};
 use crate::models::{AudioTrack, MediaMetadata, ToolHealth};
 use serde::Deserialize;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{path::BaseDirectory, AppHandle, Manager};
 
 #[derive(Debug, Clone)]
 pub struct Ffmpeg {
     ffmpeg_path: Option<PathBuf>,
     ffprobe_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AudioPreviewMethod {
+    Cache,
+    Copy,
+    Transcode,
+}
+
+impl AudioPreviewMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cache => "cache",
+            Self::Copy => "copy",
+            Self::Transcode => "transcode",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TrimMethod {
+    Nvenc,
+    Cpu,
+    StreamCopy,
+}
+
+impl TrimMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nvenc => "nvenc",
+            Self::Cpu => "libx264",
+            Self::StreamCopy => "stream_copy",
+        }
+    }
 }
 
 impl Ffmpeg {
@@ -82,19 +120,32 @@ impl Ffmpeg {
     }
 
     pub fn probe(&self, path: &Path) -> AppResult<MediaMetadata> {
-        Ok(self.probe_response(path)?.into_metadata())
+        Ok(self.probe_response(path, None)?.into_metadata())
     }
 
     pub fn audio_tracks(&self, path: &Path) -> AppResult<Vec<AudioTrack>> {
-        Ok(self.probe_response(path)?.audio_tracks())
+        Ok(self.probe_response(path, None)?.audio_tracks())
     }
 
-    fn probe_response(&self, path: &Path) -> AppResult<ProbeResponse> {
+    pub fn audio_tracks_cancellable(
+        &self,
+        path: &Path,
+        cancelled: &AtomicBool,
+    ) -> AppResult<Vec<AudioTrack>> {
+        Ok(self.probe_response(path, Some(cancelled))?.audio_tracks())
+    }
+
+    fn probe_response(
+        &self,
+        path: &Path,
+        cancelled: Option<&AtomicBool>,
+    ) -> AppResult<ProbeResponse> {
         let ffprobe = self
             .ffprobe_path
             .as_ref()
             .ok_or_else(|| user_error("FFprobe is not configured"))?;
-        let output = Command::new(ffprobe)
+        let mut command = Command::new(ffprobe);
+        command
             .args([
                 "-v",
                 "error",
@@ -103,9 +154,10 @@ impl Ffmpeg {
                 "-show_format",
                 "-show_streams",
             ])
-            .arg(path)
-            .output()?;
-        if !output.status.success() {
+            .arg(path);
+        let output =
+            run_with_timeout_cancellable(command, Duration::from_secs(30), "FFprobe", cancelled)?;
+        if !output.success {
             return Err(user_error(format!(
                 "FFprobe failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
@@ -123,8 +175,9 @@ impl Ffmpeg {
             std::fs::create_dir_all(parent)?;
         }
         let timestamp = format!("{:.3}", at_seconds.max(0.0));
-        let output = thumbnail_command(ffmpeg, source, output_path, &timestamp).output()?;
-        if output.status.success() {
+        let command = thumbnail_command(ffmpeg, source, output_path, &timestamp);
+        let output = run_with_timeout(command, Duration::from_secs(30), "thumbnail generation")?;
+        if output.success {
             Ok(())
         } else {
             Err(user_error(
@@ -138,58 +191,68 @@ impl Ffmpeg {
         source: &Path,
         output_path: &Path,
         stream_index: u32,
-    ) -> AppResult<()> {
+        cancelled: &AtomicBool,
+    ) -> AppResult<AudioPreviewMethod> {
         let ffmpeg = self
             .ffmpeg_path
             .as_ref()
             .ok_or_else(|| user_error("FFmpeg is not configured"))?;
-        if output_path
-            .metadata()
-            .map(|metadata| metadata.is_file() && metadata.len() > 1024)
-            .unwrap_or(false)
-        {
-            return Ok(());
+        if is_usable_media_file(output_path) {
+            return Ok(AudioPreviewMethod::Cache);
         }
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let temp_path = output_path.with_extension("part.m4a");
-        let _ = std::fs::remove_file(&temp_path);
-        let mut command = Command::new(ffmpeg);
-        command.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]);
-        command.arg(source);
-        command.arg("-map").arg(format!("0:{stream_index}"));
-        command.args([
-            "-vn",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-movflags",
-            "+faststart",
-        ]);
-        command.arg(&temp_path);
-        let output = command.output()?;
-        if !output.status.success() {
+        let temp_path = unique_audio_temp_path(output_path);
+        let run = |codec_args: &[&str]| -> AppResult<ProcessResult> {
+            let mut command = Command::new(ffmpeg);
+            command.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]);
+            command.arg(source);
+            command.arg("-map").arg(format!("0:{stream_index}"));
+            command
+                .arg("-vn")
+                .args(codec_args)
+                .args(["-movflags", "+faststart"]);
+            command.arg(&temp_path);
+            let result = run_cancellable(command, cancelled);
+            if result.is_err() {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            result
+        };
+
+        let mut method = AudioPreviewMethod::Transcode;
+        let mut result = None;
+        let copied = run(&["-c:a", "copy"])?;
+        if copied.success && is_usable_media_file(&temp_path) {
+            method = AudioPreviewMethod::Copy;
+            result = Some(copied);
+        } else {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        let output = match result {
+            Some(output) => output,
+            None => run(&["-c:a", "aac", "-b:a", "160k"])?,
+        };
+        if !output.success {
             let _ = std::fs::remove_file(&temp_path);
             return Err(user_error(format!(
                 "audio preview failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                output.stderr.trim()
             )));
         }
-        if !temp_path
-            .metadata()
-            .map(|metadata| metadata.len() > 1024)
-            .unwrap_or(false)
-        {
+        if !is_usable_media_file(&temp_path) {
             let _ = std::fs::remove_file(&temp_path);
             return Err(user_error("FFmpeg produced an empty audio preview"));
         }
         if output_path.exists() {
             std::fs::remove_file(output_path)?;
         }
-        std::fs::rename(temp_path, output_path)?;
-        Ok(())
+        if let Err(error) = std::fs::rename(&temp_path, output_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        Ok(method)
     }
 
     pub fn trim(
@@ -200,7 +263,7 @@ impl Ffmpeg {
         end_seconds: f64,
         accurate: bool,
         audio_track_indices: &[u32],
-    ) -> AppResult<()> {
+    ) -> AppResult<TrimMethod> {
         let ffmpeg = self
             .ffmpeg_path
             .as_ref()
@@ -214,7 +277,10 @@ impl Ffmpeg {
 
         let start = format!("{:.3}", start_seconds.max(0.0));
         let duration = format!("{:.3}", end_seconds - start_seconds);
-        let run = |video_args: &[&str]| -> AppResult<std::process::Output> {
+        let timeout = Duration::from_secs_f64(
+            ((end_seconds - start_seconds) * 4.0 + 60.0).clamp(120.0, 7_200.0),
+        );
+        let run = |video_args: &[&str]| -> AppResult<CapturedProcessResult> {
             let mut command = Command::new(ffmpeg);
             command.args(["-y", "-hide_banner", "-loglevel", "error", "-ss", &start]);
             command.arg("-i").arg(source);
@@ -242,9 +308,9 @@ impl Ffmpeg {
             command.args(video_args);
             command.args(["-map_metadata", "0", "-movflags", "+faststart"]);
             command.arg(output_path);
-            command.output().map_err(Into::into)
+            run_with_timeout(command, timeout, "clip export")
         };
-        let output = if accurate {
+        let (output, method) = if accurate {
             let nvenc = run(&[
                 "-c:v",
                 "h264_nvenc",
@@ -259,19 +325,25 @@ impl Ffmpeg {
                 "-b:a",
                 "192k",
             ])?;
-            if nvenc.status.success() {
-                nvenc
+            if nvenc.success {
+                (nvenc, TrimMethod::Nvenc)
             } else {
-                run(&[
-                    "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "192k",
-                ])?
+                (
+                    run(&[
+                        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt",
+                        "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                    ])?,
+                    TrimMethod::Cpu,
+                )
             }
         } else {
-            run(&["-c", "copy", "-avoid_negative_ts", "make_zero"])?
+            (
+                run(&["-c", "copy", "-avoid_negative_ts", "make_zero"])?,
+                TrimMethod::StreamCopy,
+            )
         };
-        if output.status.success() {
-            Ok(())
+        if output.success {
+            Ok(method)
         } else if accurate {
             Err(user_error(
                 String::from_utf8_lossy(&output.stderr).to_string(),
@@ -309,6 +381,162 @@ fn thumbnail_command(ffmpeg: &Path, source: &Path, output_path: &Path, timestamp
     ]);
     command.arg(output_path);
     command
+}
+
+struct ProcessResult {
+    success: bool,
+    stderr: String,
+}
+
+struct CapturedProcessResult {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_with_timeout(
+    command: Command,
+    timeout: Duration,
+    operation: &str,
+) -> AppResult<CapturedProcessResult> {
+    run_with_timeout_cancellable(command, timeout, operation, None)
+}
+
+fn run_with_timeout_cancellable(
+    mut command: Command,
+    timeout: Duration,
+    operation: &str,
+    cancelled: Option<&AtomicBool>,
+) -> AppResult<CapturedProcessResult> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|pipe| thread::spawn(move || drain_reader(pipe, 8 * 1024 * 1024)));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|pipe| thread::spawn(move || drain_reader(pipe, 16 * 1024)));
+    let started = Instant::now();
+    loop {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(reader) = stdout_reader {
+                let _ = reader.join();
+            }
+            if let Some(reader) = stderr_reader {
+                let _ = reader.join();
+            }
+            return Err(user_error(format!("{operation} cancelled")));
+        }
+        if let Some(status) = child.try_wait()? {
+            let stdout = stdout_reader
+                .and_then(|reader| reader.join().ok())
+                .unwrap_or_default();
+            let stderr = stderr_reader
+                .and_then(|reader| reader.join().ok())
+                .unwrap_or_default();
+            return Ok(CapturedProcessResult {
+                success: status.success(),
+                stdout,
+                stderr,
+            });
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(reader) = stdout_reader {
+                let _ = reader.join();
+            }
+            if let Some(reader) = stderr_reader {
+                let _ = reader.join();
+            }
+            return Err(user_error(format!(
+                "{operation} timed out after {} seconds",
+                timeout.as_secs()
+            )));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn run_cancellable(mut command: Command, cancelled: &AtomicBool) -> AppResult<ProcessResult> {
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|pipe| thread::spawn(move || drain_reader(pipe, 4096)));
+    let started = Instant::now();
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(reader) = stderr_reader {
+                let _ = reader.join();
+            }
+            return Err(user_error("audio preview cancelled"));
+        }
+        if started.elapsed() >= Duration::from_secs(30 * 60) {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(reader) = stderr_reader {
+                let _ = reader.join();
+            }
+            return Err(user_error("audio preview timed out after 30 minutes"));
+        }
+        if let Some(status) = child.try_wait()? {
+            let stderr = stderr_reader
+                .and_then(|reader| reader.join().ok())
+                .unwrap_or_default();
+            return Ok(ProcessResult {
+                success: status.success(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            });
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn drain_reader(mut reader: impl Read, capture_limit: usize) -> Vec<u8> {
+    let mut captured = Vec::with_capacity(capture_limit.min(4096));
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let Ok(read) = reader.read(&mut buffer) else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+        let remaining = capture_limit.saturating_sub(captured.len());
+        captured.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+    captured
+}
+
+fn is_usable_media_file(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.len() > 1024)
+        .unwrap_or(false)
+}
+
+fn unique_audio_temp_path(output_path: &Path) -> PathBuf {
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros())
+        .unwrap_or_default();
+    let stem = output_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("audio-preview");
+    output_path.with_file_name(format!(
+        ".{stem}-{}-{nonce}-{sequence}.part.m4a",
+        std::process::id()
+    ))
 }
 
 #[cfg(debug_assertions)]

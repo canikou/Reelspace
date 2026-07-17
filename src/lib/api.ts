@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   AppSnapshot,
+  AudioPreviewResult,
   AudioTrack,
   Collection,
   CreateClipRequest,
@@ -20,9 +21,14 @@ export const api = {
   scanSources: () => invoke<MediaItem[]>("scan_sources"),
   repairThumbnails: () => invoke<MediaItem[]>("repair_thumbnails"),
   listMedia: (kind?: MediaKind) => invoke<MediaItem[]>("list_media", { kind }),
-  getMediaAudioTracks: (id: string) => invoke<AudioTrack[]>("get_media_audio_tracks", { id }),
-  getAudioTrackPreview: (id: string, streamIndex: number) =>
-    invoke<string>("get_audio_track_preview", { id, streamIndex }),
+  getMediaAudioTracks: (id: string, sessionId: string) =>
+    invoke<AudioTrack[]>("get_media_audio_tracks", { id, sessionId }),
+  getAudioTrackPreview: (id: string, streamIndex: number, sessionId: string) =>
+    invoke<AudioPreviewResult>("get_audio_track_preview", { id, streamIndex, sessionId }),
+  cancelAudioPreviewSession: (sessionId: string) =>
+    invoke<void>("cancel_audio_preview_session", { sessionId }),
+  logClientEvent: (event: string, fields: Record<string, unknown>) =>
+    invoke<void>("log_client_event", { event, fields }),
   updateMediaTags: (id: string, tags: string[]) =>
     invoke<MediaItem>("update_media_tags", { id, tags }),
   updateMediaNotes: (id: string, notes?: string | null) =>

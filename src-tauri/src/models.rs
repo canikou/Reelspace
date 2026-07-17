@@ -100,6 +100,7 @@ pub struct Collection {
 #[serde(rename_all = "camelCase")]
 pub struct CreateClipRequest {
     pub source_id: String,
+    pub session_id: Option<String>,
     pub start_seconds: f64,
     pub end_seconds: f64,
     pub title: Option<String>,
@@ -116,6 +117,16 @@ pub struct AudioTrack {
     pub language: Option<String>,
     pub title: Option<String>,
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPreviewResult {
+    pub path: String,
+    pub cache_hit: bool,
+    pub method: String,
+    pub elapsed_ms: u64,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
