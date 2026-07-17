@@ -78,11 +78,10 @@ if not exist "node_modules" (
   call :step "Frontend dependencies already installed"
 )
 
-call :step "Building frontend"
-call pnpm build
-if errorlevel 1 goto :fail
-
 if /i "%MODE%"=="check" (
+  call :step "Building frontend"
+  call pnpm build
+  if errorlevel 1 goto :fail
   call :step "Checking Rust backend"
   cargo check --manifest-path src-tauri\Cargo.toml
   if errorlevel 1 goto :fail
@@ -92,6 +91,9 @@ if /i "%MODE%"=="check" (
 )
 
 if /i "%MODE%"=="dist" (
+  call :step "Building frontend"
+  call pnpm build
+  if errorlevel 1 goto :fail
   call :step "Building optimized installer"
   echo This is the slow path. Tauri will compile release code and package NSIS assets.
   call pnpm tauri build
@@ -103,25 +105,31 @@ if /i "%MODE%"=="dist" (
   goto :success
 )
 
-call :step "Building debug binary"
-echo The first executable build can take several minutes. Later builds should be much faster.
-cargo build --manifest-path src-tauri\Cargo.toml
-if errorlevel 1 goto :fail
-
-if not exist "src-tauri\target\debug\reelspace.exe" (
-  echo ERROR: src-tauri\target\debug\reelspace.exe was not created.
-  goto :fail
-)
-
 if /i "%MODE%"=="build" (
+  call :step "Building frontend"
+  call pnpm build
+  if errorlevel 1 goto :fail
+  call :step "Building debug binary"
+  echo The debug executable is for compile validation only. Use plain build-run.bat to run through Tauri dev.
+  cargo build --manifest-path src-tauri\Cargo.toml
+  if errorlevel 1 goto :fail
+
+  if not exist "src-tauri\target\debug\reelspace.exe" (
+    echo ERROR: src-tauri\target\debug\reelspace.exe was not created.
+    goto :fail
+  )
+
   echo.
   echo Build-only mode complete. The app was not launched.
   goto :success
 )
 
-call :step "Launching Reelspace"
+call :step "Running Tauri dev"
+echo Tauri dev starts the Vite server and the Rust app together.
+echo This fixes 127.0.0.1 connection refused from launching the raw debug executable.
+echo The first executable build can take several minutes. Later builds should be much faster.
 echo The runner will wait until the app closes.
-start "" /wait "src-tauri\target\debug\reelspace.exe"
+call pnpm tauri dev
 if errorlevel 1 goto :fail
 
 :success

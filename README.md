@@ -18,6 +18,7 @@ build-run.bat
 ```
 
 The runner prints each phase to the terminal and writes a live log to `logs\runners`.
+By default it uses Tauri dev mode, which starts the Vite frontend server and the Rust desktop app together.
 
 Useful modes:
 
