@@ -178,8 +178,10 @@ function Assert-PackagingResources {
 
   foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
     $toolPath = Join-Path $Workspace "vendor\ffmpeg\bin\$tool"
-    $versionLine = & $toolPath -version 2>&1 | Select-Object -First 1
-    if ($LASTEXITCODE -ne 0 -or -not $versionLine) {
+    $versionOutput = @(& $toolPath -version 2>&1)
+    $versionExitCode = $LASTEXITCODE
+    $versionLine = $versionOutput | Select-Object -First 1
+    if ($versionExitCode -ne 0 -or -not $versionLine) {
       throw "$tool could not report its version: $toolPath"
     }
     Write-Host ("{0}: {1}" -f $tool, [string]$versionLine) -ForegroundColor Green
