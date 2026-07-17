@@ -136,6 +136,9 @@ function Convert-RunnerArguments {
   $noPause = $false
 
   foreach ($argument in @($RunnerArgs)) {
+    if ([string]::IsNullOrWhiteSpace($argument)) {
+      continue
+    }
     switch -Regex ($argument) {
       '^--check$' { $mode = "check"; continue }
       '^--no-launch$' { $mode = "check"; continue }
