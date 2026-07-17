@@ -13,6 +13,7 @@ $ErrorActionPreference = "Stop"
 $startedAt = Get-Date
 $transcribing = $false
 $exitCode = 1
+$runnerRevision = (Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash.Substring(0, 12).ToLowerInvariant()
 
 function Write-Stage {
   param([string]$Message)
@@ -174,6 +175,15 @@ function Assert-PackagingResources {
     }
     Write-Host ("{0}: {1:N1} MB" -f $resource.Name, ($file.Length / 1MB)) -ForegroundColor Green
   }
+
+  foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
+    $toolPath = Join-Path $Workspace "vendor\ffmpeg\bin\$tool"
+    $versionLine = & $toolPath -version 2>&1 | Select-Object -First 1
+    if ($LASTEXITCODE -ne 0 -or -not $versionLine) {
+      throw "$tool could not report its version: $toolPath"
+    }
+    Write-Host ("{0}: {1}" -f $tool, [string]$versionLine) -ForegroundColor Green
+  }
 }
 
 function Assert-WindowsExecutable {
@@ -231,6 +241,7 @@ try {
   Write-Host "Reelspace build and run" -ForegroundColor White
   Write-Host "============================================================"
   Write-Host "Mode:      $Mode"
+  Write-Host "Runner:    $runnerRevision"
   Write-Host "Started:   $($startedAt.ToString('yyyy-MM-dd HH:mm:ss'))"
   Write-Host "Workspace: $Workspace"
   Write-Host "Live log:  $LogPath"
@@ -251,6 +262,20 @@ try {
   if (-not $cargoCommand) {
     $cargoCommand = Get-Command "cargo" -ErrorAction SilentlyContinue
   }
+  $nodeCommand = Get-Command "node.exe" -ErrorAction SilentlyContinue
+  if (-not $nodeCommand) {
+    $nodeCommand = Get-Command "node" -ErrorAction SilentlyContinue
+  }
+  $rustcCommand = Get-Command "rustc.exe" -ErrorAction SilentlyContinue
+  if (-not $rustcCommand) {
+    $rustcCommand = Get-Command "rustc" -ErrorAction SilentlyContinue
+  }
+  if (-not $nodeCommand) {
+    throw "Node.js was not found on PATH. Install Node.js 20 or newer."
+  }
+  if (-not $rustcCommand) {
+    throw "rustc was not found on PATH. Install the stable x64 MSVC toolchain."
+  }
   if (-not $pnpmCommand) {
     throw "pnpm was not found on PATH."
   }
@@ -260,25 +285,44 @@ try {
   if (-not (Get-Command "link.exe" -ErrorAction SilentlyContinue)) {
     throw "MSVC link.exe was not found after loading the build environment."
   }
+  if ($env:VSCMD_ARG_TGT_ARCH -and $env:VSCMD_ARG_TGT_ARCH -ne "x64") {
+    throw "MSVC target architecture is $env:VSCMD_ARG_TGT_ARCH; Reelspace requires x64."
+  }
 
+  Write-Host "node:  $(& $nodeCommand.Source --version)"
   Write-Host "pnpm: $(& $pnpmCommand.Source --version)"
   Write-Host "cargo: $(& $cargoCommand.Source --version)"
+  Write-Host "rustc: $(& $rustcCommand.Source --version)"
+  $rustHost = & $rustcCommand.Source -vV | Where-Object { $_ -like "host:*" } | Select-Object -First 1
+  Write-Host "target: $rustHost / MSVC $env:VSCMD_ARG_TGT_ARCH"
   Sync-FrontendDependencies -Pnpm $pnpmCommand.Source
+  $tauriCommand = Join-Path $Workspace "node_modules\.bin\tauri.cmd"
+  if (-not (Test-Path -LiteralPath $tauriCommand -PathType Leaf)) {
+    throw "The project-local Tauri CLI was not installed."
+  }
+  $tauriVersion = & $tauriCommand --version 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    throw "The Tauri CLI could not report its version."
+  }
+  Write-Host "tauri: $tauriVersion"
 
   switch ($Mode) {
     "check" {
+      Write-Host "Normalized command: pnpm build; cargo check --manifest-path src-tauri\Cargo.toml"
       Write-Stage "Checking the frontend"
       Invoke-RunnerCommand -FilePath $pnpmCommand.Source -Arguments @("build")
       Write-Stage "Checking the Rust backend"
       Invoke-RunnerCommand -FilePath $cargoCommand.Source -Arguments @("check", "--manifest-path", "src-tauri\Cargo.toml")
     }
     "build" {
+      Write-Host "Normalized command: pnpm build; cargo build --manifest-path src-tauri\Cargo.toml"
       Write-Stage "Building the frontend"
       Invoke-RunnerCommand -FilePath $pnpmCommand.Source -Arguments @("build")
       Write-Stage "Building the debug application"
       Invoke-RunnerCommand -FilePath $cargoCommand.Source -Arguments @("build", "--manifest-path", "src-tauri\Cargo.toml")
     }
     "setup" {
+      Write-Host "Normalized command: pnpm run tauri:build; collect NSIS setup.exe"
       Write-Stage "Checking bundled setup resources"
       Assert-PackagingResources
       Write-Stage "Building the optimized app and NSIS installer"
@@ -288,6 +332,13 @@ try {
       Copy-InstallerArtifacts
     }
     default {
+      Write-Host "Normalized command: pnpm run tauri:dev (127.0.0.1:1420)"
+      $listener = Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($listener) {
+        Write-Host "Port 1420 owner PID: $($listener.OwningProcess)"
+      } else {
+        Write-Host "Port 1420: available"
+      }
       Write-Stage "Starting Vite, compiling changed Rust code, and launching Reelspace"
       Write-Host "Keep this window open while testing. Frontend edits reload automatically."
       Write-Host "Rust edits rebuild incrementally. Closing this window terminates the full process tree."
@@ -298,11 +349,13 @@ try {
   $elapsed = (Get-Date) - $startedAt
   Write-Host ""
   Write-Host ("SUCCESS after {0:hh\:mm\:ss}." -f $elapsed) -ForegroundColor Green
+  Write-Host "Exit code: 0"
   $exitCode = 0
 } catch {
   $elapsed = (Get-Date) - $startedAt
   Write-Host ""
   Write-Host ("FAILED after {0:hh\:mm\:ss}: {1}" -f $elapsed, $_.Exception.Message) -ForegroundColor Red
+  Write-Host "Exit code: 1" -ForegroundColor Red
   Write-Host "Full log: $LogPath" -ForegroundColor Yellow
   $exitCode = 1
 } finally {
