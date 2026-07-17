@@ -146,7 +146,7 @@ if "%FAIL_CODE%"=="0" set "FAIL_CODE=1"
 echo.
 echo FAILED: build-run stopped with exit code %FAIL_CODE%.
 echo Full log: %REELSPACE_LOG%
-pause
+if not defined NO_PAUSE pause
 endlocal
 exit /b %FAIL_CODE%
 

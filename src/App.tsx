@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { Sidebar, type PageKey } from "./components/Sidebar";
 import { PlayerModal } from "./components/PlayerModal";
+import { SetupPrompt } from "./components/SetupPrompt";
 import { TrimModal } from "./components/TrimModal";
 import { api } from "./lib/api";
+import { pickFolder } from "./lib/dialog";
 import type { AppSnapshot, Collection, MediaItem } from "./lib/types";
 import { ClipsPage } from "./pages/ClipsPage";
 import { CollectionsPage } from "./pages/CollectionsPage";
@@ -20,6 +23,9 @@ export function App() {
   const [trimming, setTrimming] = useState<MediaItem | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [setupDismissed, setSetupDismissed] = useState(false);
+  const scanInFlight = useRef(false);
+  const lastScanAt = useRef(0);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -75,10 +81,59 @@ export function App() {
     [collections, refresh]
   );
 
-  async function scan() {
+  const scan = useCallback(async ({ silent = false, force = false }: { silent?: boolean; force?: boolean } = {}) => {
+    if (scanInFlight.current) return;
+    if (!force && Date.now() - lastScanAt.current < 10_000) return;
+    if (!snapshot?.settings.sourceFolders.length) return;
+    scanInFlight.current = true;
+    if (!silent) {
+      setBusy(true);
+      setError(null);
+    }
+    try {
+      await api.scanSources();
+      lastScanAt.current = Date.now();
+      await refresh();
+    } catch (err) {
+      if (!silent) setError(String(err));
+    } finally {
+      scanInFlight.current = false;
+      if (!silent) setBusy(false);
+    }
+  }, [refresh, snapshot?.settings.sourceFolders.length]);
+
+  useEffect(() => {
+    if (!snapshot?.settings.sourceFolders.length) return;
+    scan({ silent: true, force: true });
+  }, [scan, snapshot?.settings.sourceFolders.length]);
+
+  useEffect(() => {
+    function maybeScan() {
+      if (document.visibilityState === "visible") {
+        scan({ silent: true });
+      }
+    }
+    const interval = window.setInterval(maybeScan, 10_000);
+    window.addEventListener("focus", maybeScan);
+    document.addEventListener("visibilitychange", maybeScan);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", maybeScan);
+      document.removeEventListener("visibilitychange", maybeScan);
+    };
+  }, [scan]);
+
+  async function chooseInitialSourceFolder() {
     setBusy(true);
     setError(null);
     try {
+      const folder = await pickFolder();
+      if (!folder || !snapshot) return;
+      await api.saveSettings({
+        ...snapshot.settings,
+        sourceFolders: [folder]
+      });
+      setSetupDismissed(true);
       await api.scanSources();
       await refresh();
     } catch (err) {
@@ -103,8 +158,8 @@ export function App() {
             <p className="eyebrow">Reelspace</p>
             <h1>{titleFor(page)}</h1>
           </div>
-          <button className="primary-button" onClick={scan} disabled={busy} title="Scan configured source folders">
-            {busy ? "Scanning..." : "Scan"}
+          <button className="icon-button" onClick={() => scan({ force: true })} disabled={busy} title="Refresh media">
+            <RefreshCw size={20} className={busy ? "spin" : undefined} />
           </button>
         </header>
         {error ? <div className="error-banner">{error}</div> : null}
@@ -142,6 +197,13 @@ export function App() {
             await refresh();
             setPage("clips");
           }}
+        />
+      ) : null}
+      {snapshot && !snapshot.settings.sourceFolders.length && !setupDismissed ? (
+        <SetupPrompt
+          busy={busy}
+          onChoose={chooseInitialSourceFolder}
+          onDismiss={() => setSetupDismissed(true)}
         />
       ) : null}
     </div>

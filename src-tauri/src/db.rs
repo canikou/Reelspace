@@ -183,7 +183,19 @@ impl Database {
 
     pub fn update_notes(&self, id: &str, notes: Option<&str>) -> AppResult<()> {
         let conn = self.conn()?;
-        conn.execute("UPDATE media SET notes = ?1 WHERE id = ?2", params![notes, id])?;
+        conn.execute(
+            "UPDATE media SET notes = ?1 WHERE id = ?2",
+            params![notes, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_thumbnail(&self, id: &str, thumbnail_path: Option<&str>) -> AppResult<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE media SET thumbnail_path = ?1 WHERE id = ?2",
+            params![thumbnail_path, id],
+        )?;
         Ok(())
     }
 
@@ -217,7 +229,12 @@ impl Database {
         Ok(())
     }
 
-    pub fn add_to_collection(&self, collection_id: &str, media_id: &str, added_at: i64) -> AppResult<()> {
+    pub fn add_to_collection(
+        &self,
+        collection_id: &str,
+        media_id: &str,
+        added_at: i64,
+    ) -> AppResult<()> {
         let conn = self.conn()?;
         conn.execute(
             "INSERT OR IGNORE INTO collection_items (collection_id, media_id, added_at) VALUES (?1, ?2, ?3)",

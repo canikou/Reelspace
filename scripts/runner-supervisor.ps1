@@ -22,11 +22,15 @@ function Write-RunnerLine {
 
 function Get-AncestorProcessIds {
   $ids = New-Object 'System.Collections.Generic.HashSet[int]'
-  $current = Get-CimInstance Win32_Process -Filter "ProcessId = $PID"
-  while ($current -and $current.ParentProcessId) {
-    [void]$ids.Add([int]$current.ParentProcessId)
-    $parentId = [int]$current.ParentProcessId
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $parentId" -ErrorAction SilentlyContinue
+  try {
+    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction Stop
+    while ($current -and $current.ParentProcessId) {
+      [void]$ids.Add([int]$current.ParentProcessId)
+      $parentId = [int]$current.ParentProcessId
+      $current = Get-CimInstance Win32_Process -Filter "ProcessId = $parentId" -ErrorAction SilentlyContinue
+    }
+  } catch {
+    Write-RunnerLine ("Warning: process ancestor lookup is unavailable: {0}" -f $_.Exception.Message)
   }
   return $ids
 }
@@ -57,12 +61,17 @@ function Stop-StaleReelspaceProcesses {
   param([string]$Reason)
 
   $ancestorIds = Get-AncestorProcessIds
-  $candidates = Get-CimInstance Win32_Process |
-    Where-Object {
-      $_.ProcessId -ne $PID -and
-      -not $ancestorIds.Contains([int]$_.ProcessId) -and
-      (Test-ReelspaceProcess $_)
-    }
+  try {
+    $candidates = Get-CimInstance Win32_Process -ErrorAction Stop |
+      Where-Object {
+        $_.ProcessId -ne $PID -and
+        -not $ancestorIds.Contains([int]$_.ProcessId) -and
+        (Test-ReelspaceProcess $_)
+      }
+  } catch {
+    Write-RunnerLine ("Warning: stale process purge skipped ({0}): {1}" -f $Reason, $_.Exception.Message)
+    return
+  }
 
   foreach ($candidate in $candidates) {
     Write-RunnerLine ("Stopping stale process ({0}): PID {1} {2}" -f $Reason, $candidate.ProcessId, $candidate.Name)
@@ -175,13 +184,18 @@ $infoSize = [Runtime.InteropServices.Marshal]::SizeOf([type][Reelspace.JOBOBJECT
 $infoPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal($infoSize)
 
 $process = $null
+$childExitCode = 1
 try {
   [Runtime.InteropServices.Marshal]::StructureToPtr($info, $infoPtr, $false)
   if (-not [Reelspace.JobApi]::SetInformationJobObject($job, [Reelspace.JobApi]::JobObjectExtendedLimitInformation, $infoPtr, [uint32]$infoSize)) {
     throw "SetInformationJobObject failed."
   }
 
-  $quotedArgs = @((Quote-CmdArgument $BatchPath)) + ($RunnerArgs | ForEach-Object { Quote-CmdArgument $_ })
+  $extraArgs = @()
+  if ($RunnerArgs) {
+    $extraArgs = $RunnerArgs | ForEach-Object { Quote-CmdArgument $_ }
+  }
+  $quotedArgs = @((Quote-CmdArgument $BatchPath)) + $extraArgs
   $innerCommand = $quotedArgs -join ' '
 
   $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -192,8 +206,8 @@ try {
   $startInfo.RedirectStandardOutput = $true
   $startInfo.RedirectStandardError = $true
   $startInfo.CreateNoWindow = $true
-  $startInfo.Environment["REELSPACE_LOGGING"] = "1"
-  $startInfo.Environment["REELSPACE_LOG"] = $LogPath
+  [Environment]::SetEnvironmentVariable("REELSPACE_LOGGING", "1", "Process")
+  [Environment]::SetEnvironmentVariable("REELSPACE_LOG", $LogPath, "Process")
 
   $process = New-Object System.Diagnostics.Process
   $process.StartInfo = $startInfo
@@ -220,12 +234,11 @@ try {
   $process.BeginErrorReadLine()
   $process.WaitForExit()
   $process.WaitForExit()
+  $childExitCode = $process.ExitCode
 
   Unregister-Event -SubscriptionId $outSub.Id -ErrorAction SilentlyContinue
   Unregister-Event -SubscriptionId $errSub.Id -ErrorAction SilentlyContinue
   Remove-Job -Id $outSub.Id,$errSub.Id -Force -ErrorAction SilentlyContinue
-
-  exit $process.ExitCode
 } finally {
   if ($process -and -not $process.HasExited) {
     try {
@@ -240,3 +253,5 @@ try {
     [void][Reelspace.JobApi]::CloseHandle($job)
   }
 }
+
+exit $childExitCode

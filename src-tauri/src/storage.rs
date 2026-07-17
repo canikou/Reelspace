@@ -19,7 +19,8 @@ pub fn stats(items: &[MediaItem], settings: &AppSettings) -> StorageStats {
     let is_near_limit = settings
         .storage_limit_bytes
         .map(|limit| {
-            let threshold = (limit as f64 * settings.cleanup_threshold_percent as f64 / 100.0) as u64;
+            let threshold =
+                (limit as f64 * settings.cleanup_threshold_percent as f64 / 100.0) as u64;
             managed_bytes >= threshold
         })
         .unwrap_or(false);

@@ -1,5 +1,6 @@
-import { Save } from "lucide-react";
+import { FolderPlus, Save } from "lucide-react";
 import { useState } from "react";
+import { pickFolder } from "../lib/dialog";
 import { formatBytes } from "../lib/format";
 import type { AppSettings, AppSnapshot } from "../lib/types";
 
@@ -34,6 +35,25 @@ export function SettingsPage({
     }
   }
 
+  async function addSourceFolder() {
+    const folder = await pickFolder();
+    if (!folder) return;
+    const existing = sourceFolders.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!existing.some((value) => value.toLowerCase() === folder.toLowerCase())) {
+      setSourceFolders([...existing, folder].join("\n"));
+    }
+  }
+
+  async function chooseWorkingFolder() {
+    const folder = await pickFolder();
+    if (folder) setWorkingFolder(folder);
+  }
+
+  async function chooseClipFolder() {
+    const folder = await pickFolder();
+    if (folder) setClipFolder(folder);
+  }
+
   return (
     <div className="settings-layout">
       <section className="settings-panel">
@@ -47,14 +67,26 @@ export function SettingsPage({
             rows={5}
           />
         </label>
+        <button className="secondary-button" onClick={addSourceFolder} title="Add a source folder">
+          <FolderPlus size={17} />
+          Add Source Folder
+        </button>
         <label>
           Working folder
           <input value={workingFolder} onChange={(event) => setWorkingFolder(event.target.value)} placeholder="Optional" />
         </label>
+        <button className="secondary-button" onClick={chooseWorkingFolder} title="Choose working folder">
+          <FolderPlus size={17} />
+          Choose Working Folder
+        </button>
         <label>
           Clip folder
           <input value={clipFolder} onChange={(event) => setClipFolder(event.target.value)} placeholder="Defaults to working folder" />
         </label>
+        <button className="secondary-button" onClick={chooseClipFolder} title="Choose clip folder">
+          <FolderPlus size={17} />
+          Choose Clip Folder
+        </button>
       </section>
       <section className="settings-panel">
         <h2>Storage</h2>

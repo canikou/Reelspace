@@ -48,11 +48,15 @@ while (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
 Start-Sleep -Seconds 2
 Write-WatchdogLine "supervisor exited; purging remaining Reelspace processes"
 
-Get-CimInstance Win32_Process |
-  Where-Object { $_.ProcessId -ne $PID -and (Test-ReelspaceProcess $_) } |
-  ForEach-Object {
-    Write-WatchdogLine ("stopping PID {0} {1}" -f $_.ProcessId, $_.Name)
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-  }
+try {
+  Get-CimInstance Win32_Process -ErrorAction Stop |
+    Where-Object { $_.ProcessId -ne $PID -and (Test-ReelspaceProcess $_) } |
+    ForEach-Object {
+      Write-WatchdogLine ("stopping PID {0} {1}" -f $_.ProcessId, $_.Name)
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+} catch {
+  Write-WatchdogLine ("process purge skipped: {0}" -f $_.Exception.Message)
+}
 
 Write-WatchdogLine "done"

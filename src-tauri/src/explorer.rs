@@ -15,7 +15,9 @@ pub fn reveal(path: &Path) -> AppResult<()> {
     }
     #[cfg(not(windows))]
     {
-        let parent = path.parent().ok_or_else(|| user_error("file has no parent folder"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| user_error("file has no parent folder"))?;
         opener::open(parent)?;
         Ok(())
     }

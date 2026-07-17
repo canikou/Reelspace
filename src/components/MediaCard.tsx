@@ -13,10 +13,19 @@ export interface MediaActions {
 }
 
 export function MediaCard({ item, actions }: { item: MediaItem; actions: MediaActions }) {
+  const thumbnailSrc = mediaSrc(item.thumbnailPath);
+  const videoSrc = mediaSrc(item.path);
+
   return (
     <article className="media-card">
       <button className="preview-button" onClick={() => actions.view(item)} title="View">
-        {item.thumbnailPath ? <img src={mediaSrc(item.thumbnailPath)} alt="" /> : <div className="empty-preview">No preview</div>}
+        {thumbnailSrc ? (
+          <img src={thumbnailSrc} alt="" />
+        ) : videoSrc ? (
+          <video className="card-video-preview" src={videoSrc} muted preload="metadata" />
+        ) : (
+          <div className="empty-preview">No preview</div>
+        )}
         <span className="duration-pill">{formatDuration(item.durationSeconds)}</span>
       </button>
       <div className="card-body">
@@ -24,7 +33,7 @@ export function MediaCard({ item, actions }: { item: MediaItem; actions: MediaAc
           {item.tags.length ? item.tags.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>) : <span>Untagged</span>}
         </div>
         <h3 title={item.filename}>{item.filename}</h3>
-        <p>{formatBytes(item.fileSize)} · {formatShortDate(item.modifiedAt)}</p>
+        <p>{formatBytes(item.fileSize)} - {formatShortDate(item.modifiedAt)}</p>
       </div>
       <div className="card-actions">
         <button title="View" onClick={() => actions.view(item)}><Eye size={17} /></button>

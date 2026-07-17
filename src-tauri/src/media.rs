@@ -11,9 +11,16 @@ use walkdir::WalkDir;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "avi", "webm", "m4v"];
 
-pub fn scan_folder(folder: &Path, ffmpeg: &Ffmpeg, thumbnail_dir: &Path) -> AppResult<Vec<MediaItem>> {
+pub fn scan_folder(
+    folder: &Path,
+    ffmpeg: &Ffmpeg,
+    thumbnail_dir: &Path,
+) -> AppResult<Vec<MediaItem>> {
     if !folder.exists() {
-        return Err(user_error(format!("source folder does not exist: {}", folder.display())));
+        return Err(user_error(format!(
+            "source folder does not exist: {}",
+            folder.display()
+        )));
     }
 
     let files = WalkDir::new(folder)
@@ -55,7 +62,41 @@ pub fn build_clip_item(
     Ok(item)
 }
 
-pub fn clip_output_path(clip_dir: &Path, request: &CreateClipRequest, source: &MediaItem) -> PathBuf {
+pub fn ensure_thumbnail(
+    id: &str,
+    path: &Path,
+    duration_seconds: f64,
+    ffmpeg: &Ffmpeg,
+    thumbnail_dir: &Path,
+) -> AppResult<Option<PathBuf>> {
+    let thumbnail_path = thumbnail_dir.join(format!("{id}.jpg"));
+    if is_usable_thumbnail(&thumbnail_path) {
+        return Ok(Some(thumbnail_path));
+    }
+
+    if thumbnail_path.exists() {
+        let _ = std::fs::remove_file(&thumbnail_path);
+    }
+
+    for at in thumbnail_offsets(duration_seconds) {
+        if ffmpeg.thumbnail(path, &thumbnail_path, at).is_ok()
+            && is_usable_thumbnail(&thumbnail_path)
+        {
+            return Ok(Some(thumbnail_path));
+        }
+        if thumbnail_path.exists() {
+            let _ = std::fs::remove_file(&thumbnail_path);
+        }
+    }
+
+    Ok(None)
+}
+
+pub fn clip_output_path(
+    clip_dir: &Path,
+    request: &CreateClipRequest,
+    source: &MediaItem,
+) -> PathBuf {
     let safe_title = request
         .title
         .as_deref()
@@ -73,7 +114,12 @@ fn build_raw_item(path: &Path, ffmpeg: &Ffmpeg, thumbnail_dir: &Path) -> AppResu
     Ok(item)
 }
 
-fn build_item_base(path: &Path, kind: MediaKind, ffmpeg: &Ffmpeg, thumbnail_dir: &Path) -> AppResult<MediaItem> {
+fn build_item_base(
+    path: &Path,
+    kind: MediaKind,
+    ffmpeg: &Ffmpeg,
+    thumbnail_dir: &Path,
+) -> AppResult<MediaItem> {
     let metadata = std::fs::metadata(path)?;
     let modified_at = metadata
         .modified()
@@ -89,14 +135,8 @@ fn build_item_base(path: &Path, kind: MediaKind, ffmpeg: &Ffmpeg, thumbnail_dir:
         .unwrap_or(modified_at);
     let id = stable_id(path);
     let probed = ffmpeg.probe(path).unwrap_or_default();
-    let thumbnail_path = thumbnail_dir.join(format!("{id}.jpg"));
-    let thumbnail = if thumbnail_path.exists() {
-        Some(thumbnail_path)
-    } else {
-        let at = if probed.duration_seconds > 10.0 { 5.0 } else { 0.0 };
-        ffmpeg.thumbnail(path, &thumbnail_path, at).ok();
-        thumbnail_path.exists().then_some(thumbnail_path)
-    };
+    let thumbnail =
+        ensure_thumbnail(&id, path, probed.duration_seconds, ffmpeg, thumbnail_dir).unwrap_or(None);
 
     Ok(MediaItem {
         id,
@@ -126,7 +166,11 @@ fn build_item_base(path: &Path, kind: MediaKind, ffmpeg: &Ffmpeg, thumbnail_dir:
 fn is_video_file(path: &Path) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
-        .map(|ext| VIDEO_EXTENSIONS.iter().any(|known| known.eq_ignore_ascii_case(ext)))
+        .map(|ext| {
+            VIDEO_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
         .unwrap_or(false)
 }
 
@@ -148,6 +192,45 @@ fn stable_id(path: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.to_string_lossy().to_lowercase().as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn is_usable_thumbnail(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.len() > 1024)
+        .unwrap_or(false)
+}
+
+fn thumbnail_offsets(duration_seconds: f64) -> Vec<f64> {
+    let mut offsets: Vec<f64> = Vec::new();
+    let candidates = if duration_seconds > 20.0 {
+        vec![
+            5.0,
+            duration_seconds * 0.25,
+            duration_seconds * 0.5,
+            1.0,
+            0.0,
+        ]
+    } else if duration_seconds > 3.0 {
+        vec![1.0, duration_seconds * 0.5, 0.0]
+    } else {
+        vec![0.0, 0.5]
+    };
+
+    for value in candidates {
+        let clamped = if duration_seconds > 0.0 {
+            value.min((duration_seconds - 0.1).max(0.0))
+        } else {
+            value.max(0.0)
+        };
+        if !offsets
+            .iter()
+            .any(|existing| (existing - clamped).abs() < 0.05)
+        {
+            offsets.push(clamped);
+        }
+    }
+
+    offsets
 }
 
 fn sanitize_filename(value: &str) -> String {

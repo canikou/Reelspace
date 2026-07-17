@@ -25,10 +25,20 @@ impl Ffmpeg {
             .filter(|path| path.exists());
 
         let ffmpeg_path = bundled_ffmpeg
-            .or_else(|| first_existing(["vendor/ffmpeg/bin/ffmpeg.exe", "../vendor/ffmpeg/bin/ffmpeg.exe"]))
+            .or_else(|| {
+                first_existing([
+                    "vendor/ffmpeg/bin/ffmpeg.exe",
+                    "../vendor/ffmpeg/bin/ffmpeg.exe",
+                ])
+            })
             .or_else(|| which::which("ffmpeg").ok());
         let ffprobe_path = bundled_ffprobe
-            .or_else(|| first_existing(["vendor/ffmpeg/bin/ffprobe.exe", "../vendor/ffmpeg/bin/ffprobe.exe"]))
+            .or_else(|| {
+                first_existing([
+                    "vendor/ffmpeg/bin/ffprobe.exe",
+                    "../vendor/ffmpeg/bin/ffprobe.exe",
+                ])
+            })
             .or_else(|| which::which("ffprobe").ok());
 
         Self {
@@ -84,15 +94,33 @@ impl Ffmpeg {
         }
         let timestamp = format!("{:.3}", at_seconds.max(0.0));
         let output = Command::new(ffmpeg)
-            .args(["-y", "-hide_banner", "-loglevel", "error", "-ss", &timestamp])
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                &timestamp,
+            ])
             .arg(source)
-            .args(["-frames:v", "1", "-vf", "scale=480:-1"])
+            .args([
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=480:-2",
+                "-q:v",
+                "3",
+            ])
             .arg(output_path)
             .output()?;
         if output.status.success() {
             Ok(())
         } else {
-            Err(user_error(String::from_utf8_lossy(&output.stderr).to_string()))
+            Err(user_error(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ))
         }
     }
 
@@ -143,7 +171,9 @@ impl Ffmpeg {
         if output.status.success() {
             Ok(())
         } else if accurate {
-            Err(user_error(String::from_utf8_lossy(&output.stderr).to_string()))
+            Err(user_error(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ))
         } else {
             Err(user_error(format!(
                 "lossless trim failed: {}",
@@ -172,7 +202,10 @@ struct ProbeResponse {
 
 impl ProbeResponse {
     fn into_metadata(self) -> MediaMetadata {
-        let video = self.streams.iter().find(|stream| stream.codec_type == "video");
+        let video = self
+            .streams
+            .iter()
+            .find(|stream| stream.codec_type == "video");
         let duration = self
             .format
             .and_then(|format| format.duration)

@@ -1,7 +1,9 @@
 use crate::error::{user_error, AppResult};
 use crate::explorer;
 use crate::media;
-use crate::models::{AppSettings, AppSnapshot, Collection, CreateClipRequest, MediaItem, MediaKind, StorageStats};
+use crate::models::{
+    AppSettings, AppSnapshot, Collection, CreateClipRequest, MediaItem, MediaKind, StorageStats,
+};
 use crate::state::AppState;
 use crate::storage;
 use chrono::Utc;
@@ -36,16 +38,24 @@ pub fn scan_sources(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
             state.db.upsert_media(&item)?;
         }
     }
+    repair_missing_thumbnails(&state)?;
     state.db.list_media(Some(MediaKind::Raw))
 }
 
 #[tauri::command]
-pub fn list_media(state: State<'_, AppState>, kind: Option<MediaKind>) -> AppResult<Vec<MediaItem>> {
+pub fn list_media(
+    state: State<'_, AppState>,
+    kind: Option<MediaKind>,
+) -> AppResult<Vec<MediaItem>> {
     state.db.list_media(kind)
 }
 
 #[tauri::command]
-pub fn update_media_tags(state: State<'_, AppState>, id: String, tags: Vec<String>) -> AppResult<MediaItem> {
+pub fn update_media_tags(
+    state: State<'_, AppState>,
+    id: String,
+    tags: Vec<String>,
+) -> AppResult<MediaItem> {
     let normalized = tags
         .into_iter()
         .map(|tag| tag.trim().to_string())
@@ -56,7 +66,11 @@ pub fn update_media_tags(state: State<'_, AppState>, id: String, tags: Vec<Strin
 }
 
 #[tauri::command]
-pub fn update_media_notes(state: State<'_, AppState>, id: String, notes: Option<String>) -> AppResult<MediaItem> {
+pub fn update_media_notes(
+    state: State<'_, AppState>,
+    id: String,
+    notes: Option<String>,
+) -> AppResult<MediaItem> {
     let cleaned = notes
         .as_deref()
         .map(str::trim)
@@ -103,7 +117,13 @@ pub fn create_clip(state: State<'_, AppState>, request: CreateClipRequest) -> Ap
     }
     let clip_dir = resolve_clip_dir(&settings, &state.data_dir)?;
     let output_path = media::clip_output_path(&clip_dir, &request, &source);
-    let item = media::build_clip_item(&request, &source, output_path, &state.ffmpeg, &state.thumbnail_dir)?;
+    let item = media::build_clip_item(
+        &request,
+        &source,
+        output_path,
+        &state.ffmpeg,
+        &state.thumbnail_dir,
+    )?;
     state.db.upsert_media(&item)?;
     Ok(item)
 }
@@ -149,6 +169,33 @@ fn resolve_clip_dir(settings: &AppSettings, data_dir: &Path) -> AppResult<PathBu
         .unwrap_or_else(|| data_dir.join("clips"));
     std::fs::create_dir_all(&clip_dir)?;
     Ok(clip_dir)
+}
+
+fn repair_missing_thumbnails(state: &State<'_, AppState>) -> AppResult<()> {
+    let items = state.db.list_media(None)?;
+    for item in items {
+        let current = item.thumbnail_path.as_ref().map(Path::new);
+        let needs_thumbnail = current
+            .and_then(|path| path.metadata().ok())
+            .map(|metadata| !metadata.is_file() || metadata.len() <= 1024)
+            .unwrap_or(true);
+
+        if !needs_thumbnail {
+            continue;
+        }
+
+        if let Ok(Some(thumbnail_path)) = media::ensure_thumbnail(
+            &item.id,
+            Path::new(&item.path),
+            item.duration_seconds,
+            &state.ffmpeg,
+            &state.thumbnail_dir,
+        ) {
+            let thumbnail = thumbnail_path.to_string_lossy().to_string();
+            state.db.update_thumbnail(&item.id, Some(&thumbnail))?;
+        }
+    }
+    Ok(())
 }
 
 fn stable_id(value: &str) -> String {

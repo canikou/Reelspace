@@ -20,6 +20,7 @@ export function TrimModal({
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const src = mediaSrc(item.path);
 
   const duration = Math.max(1, Math.floor(item.durationSeconds || 1));
   const span = useMemo(() => Math.max(0, end - start), [end, start]);
@@ -65,7 +66,14 @@ export function TrimModal({
           </div>
           <button title="Close" onClick={onClose}><X size={18} /></button>
         </header>
-        <video ref={videoRef} src={mediaSrc(item.path)} controls className="video-player trim-video" />
+        <video
+          ref={videoRef}
+          src={src}
+          controls
+          className="video-player trim-video"
+          onCanPlay={() => setError(null)}
+          onError={() => setError("This file could not be opened by the embedded player. The saved trim can still work if FFmpeg supports it.")}
+        />
         <div className="trim-panel">
           <label>
             Clip title

@@ -1,10 +1,12 @@
 import { Maximize2, X } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { mediaSrc } from "../lib/api";
 import type { MediaItem } from "../lib/types";
 
 export function PlayerModal({ item, onClose }: { item: MediaItem; onClose: () => void }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const src = mediaSrc(item.path);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -31,7 +33,16 @@ export function PlayerModal({ item, onClose }: { item: MediaItem; onClose: () =>
             <button title="Close" onClick={onClose}><X size={18} /></button>
           </div>
         </header>
-        <video ref={videoRef} src={mediaSrc(item.path)} controls autoPlay className="video-player" />
+        {error ? <div className="player-error">{error}</div> : null}
+        <video
+          ref={videoRef}
+          src={src}
+          controls
+          autoPlay
+          className="video-player"
+          onCanPlay={() => setError(null)}
+          onError={() => setError("This file could not be opened by the embedded player. Try View in Explorer if the codec is unsupported.")}
+        />
       </section>
     </div>
   );
