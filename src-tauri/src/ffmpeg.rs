@@ -104,8 +104,8 @@ impl Ffmpeg {
     pub fn health(&self) -> ToolHealth {
         let ready = self.ffmpeg_path.is_some() && self.ffprobe_path.is_some();
         ToolHealth {
-            ffmpeg_path: self.ffmpeg_path.as_ref().map(display_path),
-            ffprobe_path: self.ffprobe_path.as_ref().map(display_path),
+            ffmpeg_path: self.ffmpeg_path.as_deref().map(display_path),
+            ffprobe_path: self.ffprobe_path.as_deref().map(display_path),
             ready,
             message: if ready {
                 "FFmpeg and FFprobe are ready".to_string()
@@ -538,10 +538,7 @@ fn run_cancellable(mut command: Command, cancelled: &AtomicBool) -> AppResult<Pr
 fn drain_reader(mut reader: impl Read, capture_limit: usize) -> Vec<u8> {
     let mut captured = Vec::with_capacity(capture_limit.min(4096));
     let mut buffer = [0_u8; 4096];
-    loop {
-        let Ok(read) = reader.read(&mut buffer) else {
-            break;
-        };
+    while let Ok(read) = reader.read(&mut buffer) {
         if read == 0 {
             break;
         }
@@ -587,7 +584,7 @@ fn first_existing<const N: usize>(candidates: [&str; N]) -> Option<PathBuf> {
         .find(|path| path.exists())
 }
 
-fn display_path(path: &PathBuf) -> String {
+fn display_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 

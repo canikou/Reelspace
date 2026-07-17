@@ -698,7 +698,7 @@ fn validated_raw_deletion_path(item: &MediaItem, settings: &AppSettings) -> AppR
         .filter_map(|source| Path::new(source).canonicalize().ok())
         .collect::<Vec<_>>();
     if !belongs_to_roots(&canonical_path, &source_roots)
-        || belongs_to_roots(&canonical_path, &output_roots(&settings))
+        || belongs_to_roots(&canonical_path, &output_roots(settings))
     {
         return Err(app_error(
             ErrorCode::PathOutsideManagedRoots,
