@@ -123,28 +123,7 @@ impl Ffmpeg {
             std::fs::create_dir_all(parent)?;
         }
         let timestamp = format!("{:.3}", at_seconds.max(0.0));
-        let output = Command::new(ffmpeg)
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                &timestamp,
-            ])
-            .arg(source)
-            .args([
-                "-map",
-                "0:v:0",
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale=480:-2",
-                "-q:v",
-                "3",
-            ])
-            .arg(output_path)
-            .output()?;
+        let output = thumbnail_command(ffmpeg, source, output_path, &timestamp).output()?;
         if output.status.success() {
             Ok(())
         } else {
@@ -306,6 +285,32 @@ impl Ffmpeg {
     }
 }
 
+fn thumbnail_command(ffmpeg: &Path, source: &Path, output_path: &Path, timestamp: &str) -> Command {
+    let mut command = Command::new(ffmpeg);
+    command.args([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        timestamp,
+        "-i",
+    ]);
+    command.arg(source);
+    command.args([
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=480:-2",
+        "-q:v",
+        "3",
+    ]);
+    command.arg(output_path);
+    command
+}
+
 #[cfg(debug_assertions)]
 fn existing_file(path: PathBuf) -> Option<PathBuf> {
     path.is_file().then_some(path)
@@ -407,4 +412,28 @@ struct ProbeTags {
 #[derive(Debug, Deserialize)]
 struct ProbeDisposition {
     default: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumbnail_source_is_an_explicit_ffmpeg_input() {
+        let command = thumbnail_command(
+            Path::new("ffmpeg.exe"),
+            Path::new("source.mp4"),
+            Path::new("thumbnail.jpg"),
+            "5.000",
+        );
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let source_index = args
+            .iter()
+            .position(|argument| argument == "source.mp4")
+            .expect("source argument");
+        assert_eq!(args.get(source_index - 1).map(String::as_str), Some("-i"));
+    }
 }
