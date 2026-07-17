@@ -10,5 +10,6 @@ src-tauri/.tauri/
 *.db
 *.db-shm
 *.db-wal
+logs/
 vendor/ffmpeg/bin/*.exe
 !vendor/ffmpeg/bin/.gitkeep
