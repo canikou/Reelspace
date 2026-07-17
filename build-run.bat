@@ -15,7 +15,7 @@ echo Reelspace runner starting...
 echo Live log: %REELSPACE_LOG%
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:REELSPACE_LOGGING='1'; $env:REELSPACE_LOG='%REELSPACE_LOG%'; & '%~f0' %* 2>&1 | ForEach-Object { $_.ToString() } | Tee-Object -FilePath $env:REELSPACE_LOG -Append; exit $LASTEXITCODE"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\scripts\runner-supervisor.ps1" -BatchPath "%~f0" -Workspace "%CD%" -LogPath "%REELSPACE_LOG%" %*
 set "OUTER_CODE=%ERRORLEVEL%"
 echo.
 echo Reelspace runner finished with exit code %OUTER_CODE%.
