@@ -80,6 +80,8 @@ cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 pnpm tauri:build
 ```
 
+Updater-enabled packaging requires `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The repository's `build-setup.bat` loads the maintainer's DPAPI-protected local key automatically; other source builders should provide their own Tauri updater key when producing an installer.
+
 The FFmpeg preparation script downloads one pinned BtbN Windows build, verifies its archive and executable hashes, and stages only FFmpeg, FFprobe, and their license for packaging. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
 Release candidates also run `scripts/test-release-media.ps1`. With no arguments it creates and removes its own sanitized fixtures; a custom source folder may contain one valid recording and at least one malformed `.mp4`. The harness exercises scanning, failure isolation, thumbnailing, accurate clipping, persistence, and metadata export/import without writing into the source folder.
