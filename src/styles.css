@@ -118,6 +118,8 @@ h3 { font-size: 13px; }
 .search-control button { display: grid; place-items: center; padding: 2px; color: var(--muted); background: transparent; }
 .toolbar-meta { display: flex; gap: 3px; padding: 0 6px; color: var(--subtle); font-size: 11px; }
 .toolbar-meta strong { color: var(--text); }
+.load-more { justify-self: center; min-width: 180px; padding: 10px 18px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text); background: var(--surface-raised); font-weight: 750; }
+.load-more:hover { border-color: var(--accent-solid); background: var(--accent-soft); }
 .sort-control select { color: var(--muted); font-size: 11px; }
 .view-toggle { display: flex; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--canvas); }
 .view-toggle button { display: grid; place-items: center; width: 30px; height: 28px; border-radius: 5px; color: var(--subtle); background: transparent; }

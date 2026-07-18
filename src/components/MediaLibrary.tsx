@@ -1,11 +1,12 @@
 import { Grid2X2, List, Search, SlidersHorizontal, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { MediaItem } from "../lib/types";
 import { MediaGrid } from "./MediaGrid";
 import type { MediaActions } from "./MediaCard";
 
 type SortKey = "latest" | "oldest" | "largest" | "longest";
 type ViewMode = "grid" | "list";
+export const MEDIA_RENDER_PAGE_SIZE = 200;
 
 export function MediaLibrary({
   items,
@@ -21,6 +22,7 @@ export function MediaLibrary({
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("latest");
   const [view, setView] = useState<ViewMode>("grid");
+  const [visibleLimit, setVisibleLimit] = useState(MEDIA_RENDER_PAGE_SIZE);
   const visible = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     const filtered = needle
@@ -37,6 +39,11 @@ export function MediaLibrary({
       return b.modifiedAt - a.modifiedAt;
     });
   }, [items, query, sort]);
+  useEffect(() => {
+    setVisibleLimit(MEDIA_RENDER_PAGE_SIZE);
+  }, [items, query, sort, view]);
+  const rendered = visible.slice(0, visibleLimit);
+  const remaining = visible.length - rendered.length;
 
   return (
     <div className="library-stack">
@@ -68,7 +75,15 @@ export function MediaLibrary({
           <button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-label="List view" title="List view"><List size={17} /></button>
         </div>
       </div>
-      <MediaGrid items={visible} actions={actions} empty={query ? "No media matches this search." : empty} view={view} highlightedId={highlightedId} />
+      <MediaGrid items={rendered} actions={actions} empty={query ? "No media matches this search." : empty} view={view} highlightedId={highlightedId} />
+      {remaining > 0 ? (
+        <button
+          className="load-more"
+          onClick={() => setVisibleLimit((current) => current + MEDIA_RENDER_PAGE_SIZE)}
+        >
+          Show {Math.min(remaining, MEDIA_RENDER_PAGE_SIZE)} more
+        </button>
+      ) : null}
     </div>
   );
 }
