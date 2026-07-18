@@ -2,6 +2,7 @@ mod commands;
 pub mod db;
 pub mod error;
 mod explorer;
+mod features;
 pub mod ffmpeg;
 mod jobs;
 pub mod media;
@@ -11,10 +12,15 @@ mod recovery;
 mod state;
 mod storage;
 mod telemetry;
+mod watcher;
+mod youtube;
 
 use commands::*;
+use features::*;
 use state::AppState;
 use tauri::Manager;
+use watcher::start_library_watcher;
+use youtube::*;
 
 pub fn run() -> error::AppResult<()> {
     let built = tauri::Builder::default()
@@ -41,8 +47,12 @@ pub fn run() -> error::AppResult<()> {
                 }),
             );
             let worker_state = state.clone();
+            let archive_worker_state = state.clone();
+            let watcher_state = state.clone();
             app.manage(state);
             start_thumbnail_worker(worker_state);
+            start_youtube_worker(archive_worker_state);
+            start_library_watcher(watcher_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -67,7 +77,32 @@ pub fn run() -> error::AppResult<()> {
             reveal_in_explorer,
             get_storage_stats,
             get_cleanup_candidates,
-            delete_raw_file
+            delete_raw_file,
+            list_games,
+            create_game,
+            list_game_assignments,
+            rename_game,
+            merge_games,
+            assign_game,
+            list_archive_statuses,
+            set_keep_local,
+            queue_archive,
+            list_upload_jobs,
+            control_upload_queue,
+            list_media_events,
+            remove_from_collection,
+            set_collection_storage_default,
+            detect_recording_apps,
+            launch_recording_app,
+            remove_local_copy,
+            open_remote_copy,
+            repair_library,
+            open_diagnostics_folder,
+            export_diagnostics,
+            get_archive_account,
+            connect_youtube,
+            disconnect_youtube,
+            delete_youtube_remote
         ])
         .build(tauri::generate_context!());
     let app = match built {

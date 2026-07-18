@@ -151,6 +151,7 @@ fn run_smoke(
         clip_folder: Some(output_root.display().to_string()),
         storage_limit_bytes: None,
         cleanup_threshold_percent: 90,
+        ..AppSettings::default()
     };
     let exported = export_library_data(&database, &settings, scratch, archive_path)?;
     if exported.items != 2 || exported.collections != 1 {

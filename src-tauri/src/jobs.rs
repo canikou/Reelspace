@@ -98,6 +98,13 @@ impl MediaJobQueue {
         format!("{operation}-{sequence}")
     }
 
+    pub fn active_count(&self) -> usize {
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
     pub fn acquire(
         self: &Arc<Self>,
         cancelled: Option<&AtomicBool>,

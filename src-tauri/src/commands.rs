@@ -119,6 +119,9 @@ pub fn get_app_state(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
         settings,
         ffmpeg: state.ffmpeg.health(),
         stats,
+        active_media_work: state.media_jobs.active_count() > 0
+            || state.export_jobs.active_count() > 0
+            || state.background_jobs.active_count() > 0,
     })
 }
 
@@ -166,7 +169,7 @@ impl Drop for ScanInFlightGuard {
     }
 }
 
-fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
+pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
     let _index_guard = state
         .media_index_lock
         .lock()
@@ -246,14 +249,32 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
         .cloned()
         .collect::<Vec<_>>();
     state.db.upsert_media_batch(&changed_items)?;
+    state.db.classify_media_items(&changed_items)?;
+    if settings.automatically_archive_recordings {
+        let media_ids = changed_items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        if !media_ids.is_empty() {
+            let _ = state.db.queue_archive(&media_ids)?;
+        }
+    }
     for item in existing_items {
         let path = Path::new(&item.path);
         if belongs_to_roots(path, &reachable_sources)
             && !belongs_to_roots(path, &excluded_roots)
             && matches!(path.try_exists(), Ok(false))
         {
-            state.db.delete_media(&item.id)?;
-            files_missing += 1;
+            if state.db.has_verified_remote(&item.id)? {
+                state.db.record_media_event(
+                    &item.id,
+                    "local_copy_missing",
+                    Some("Preserved because a verified remote copy exists"),
+                )?;
+            } else {
+                state.db.delete_media(&item.id)?;
+                files_missing += 1;
+            }
         }
     }
     let queued_thumbnails = queue_missing_thumbnails(state, 0, false)?;
@@ -524,6 +545,12 @@ pub fn add_to_collection(
     state
         .db
         .add_to_collection(&collection_id, &media_id, Utc::now().timestamp())?;
+    if let Some(policy) = state.db.collection_storage_default(&collection_id)? {
+        state.db.set_keep_local(&media_id, policy == "keepLocal")?;
+        if policy == "archive" && Path::new(&state.db.get_media(&media_id)?.path).is_file() {
+            state.db.queue_archive(std::slice::from_ref(&media_id))?;
+        }
+    }
     state.db.list_collections()
 }
 
@@ -698,6 +725,12 @@ fn create_clip_inner(state: &AppState, mut request: CreateClipRequest) -> AppRes
             let _ = std::fs::remove_file(thumbnail);
         }
         return Err(error);
+    }
+    state
+        .db
+        .initialize_clip_preferences(&source.id, &item.id, settings.keep_local_clips)?;
+    if settings.automatically_archive_clips {
+        state.db.queue_archive(std::slice::from_ref(&item.id))?;
     }
     state.telemetry.event(
         "info",

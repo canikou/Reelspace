@@ -13,6 +13,11 @@ pub struct AppSettings {
     pub automatically_check_updates: bool,
     pub automatically_download_updates: bool,
     pub include_prerelease_updates: bool,
+    pub preferred_recording_app: Option<String>,
+    pub automatically_archive_recordings: bool,
+    pub automatically_archive_clips: bool,
+    pub keep_local_clips: bool,
+    pub pause_uploads_while_recording: bool,
 }
 
 impl Default for AppSettings {
@@ -27,6 +32,11 @@ impl Default for AppSettings {
             automatically_check_updates: true,
             automatically_download_updates: false,
             include_prerelease_updates: true,
+            preferred_recording_app: None,
+            automatically_archive_recordings: false,
+            automatically_archive_clips: false,
+            keep_local_clips: true,
+            pause_uploads_while_recording: true,
         }
     }
 }
@@ -117,6 +127,7 @@ pub struct Collection {
     pub id: String,
     pub name: String,
     pub item_count: u32,
+    pub storage_default: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +203,7 @@ pub struct AppSnapshot {
     pub settings: AppSettings,
     pub ffmpeg: ToolHealth,
     pub stats: StorageStats,
+    pub active_media_work: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,4 +213,84 @@ pub struct ToolHealth {
     pub ffprobe_path: Option<String>,
     pub ready: bool,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Game {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub media_count: u64,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GameAssignment {
+    pub media_id: String,
+    pub game_id: String,
+    pub game_name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveStatus {
+    pub media_id: String,
+    pub state: String,
+    pub keep_local: bool,
+    pub remote_copy_count: u64,
+    pub primary_remote_url: Option<String>,
+    pub progress_percent: u8,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveAccount {
+    pub provider: String,
+    pub account_id: String,
+    pub display_name: String,
+    pub connected_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadJob {
+    pub id: String,
+    pub media_id: String,
+    pub filename: String,
+    pub state: String,
+    pub priority: i64,
+    pub bytes_uploaded: u64,
+    pub total_bytes: u64,
+    pub attempts: u32,
+    pub error: Option<String>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaEvent {
+    pub event: String,
+    pub detail: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecorderApp {
+    pub id: String,
+    pub name: String,
+    pub executable_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairSummary {
+    pub missing_local_files: u64,
+    pub preserved_remote_only_items: u64,
+    pub thumbnails_queued: u64,
+    pub stale_jobs_recovered: u64,
 }
