@@ -308,7 +308,7 @@ export function App() {
             snapshot={snapshot}
             recorders={recorders}
             archiveAccount={archiveAccount}
-            onConnectYouTube={async (clientId, clientSecret) => { setArchiveAccount(await api.connectYouTube(clientId, clientSecret)); await refresh(); setNotice("YouTube archive connected"); }}
+            onConnectYouTube={async () => { setArchiveAccount(await api.connectYouTube()); await refresh(); setNotice("YouTube archive connected"); }}
             onDisconnectYouTube={async () => { await api.disconnectYouTube(); setArchiveAccount(null); await refresh(); setNotice("YouTube archive disconnected"); }}
             onSave={async (settings) => {
               const next = await api.saveSettings(settings);

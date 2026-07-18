@@ -54,4 +54,28 @@ describe("SettingsPage library data controls", () => {
     expect(markup).toContain("Import Library Data");
     expect(markup).toContain("Reelspace 0.1.1-alpha.1");
   });
+
+  it("offers browser-based YouTube sign-in without developer credential fields", () => {
+    const markup = renderToStaticMarkup(
+      <SettingsPage
+        snapshot={snapshot}
+        onSave={async () => undefined}
+        onExportData={async () => ({ items: 0, collections: 0, bytes: 0 })}
+        onImportData={async () => ({
+          matchedItems: 0,
+          restoredItems: 0,
+          unmatchedItems: 0,
+          updatedItems: 0,
+          tagConflicts: 0,
+          noteConflicts: 0,
+          collectionsCreated: 0,
+          membershipsAdded: 0
+        })}
+      />
+    );
+    expect(markup).toContain("Connect your Google account in the browser");
+    expect(markup).toContain("Connect YouTube");
+    expect(markup).not.toContain("OAuth client ID");
+    expect(markup).not.toContain("OAuth client secret");
+  });
 });

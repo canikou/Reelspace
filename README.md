@@ -47,7 +47,7 @@ Use **Export Library Data** in Settings to create a portable JSON archive of you
 
 Reelspace is local-first. It has no Reelspace account, cloud sync, advertising, analytics service, or hosted crash-report collector. Your database, thumbnails, previews, recovery reports, and rotated diagnostics remain in your Windows application-data directory. Routine logs avoid full media paths, but review any diagnostic file before sharing it publicly.
 
-Private YouTube archival is optional and off by default. When enabled, OAuth credentials are kept in Windows Credential Manager and selected recordings are uploaded as private videos. Update checks contact public GitHub Releases; automatic downloads remain off by default.
+Private YouTube archival is optional and off by default. When enabled, click **Connect YouTube** and complete Google's browser sign-in; no developer credentials are required. OAuth tokens are kept in Windows Credential Manager and selected recordings are uploaded as private videos. Update checks contact public GitHub Releases; automatic downloads remain off by default.
 
 Exported library-data archives may contain filenames, folder references, tags, notes, and collection names. Treat them as personal data even though they contain no video or audio.
 
@@ -81,6 +81,8 @@ pnpm tauri:build
 ```
 
 Updater-enabled packaging requires `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The repository's `build-setup.bat` loads the maintainer's DPAPI-protected local key automatically; other source builders should provide their own Tauri updater key when producing an installer.
+
+Official builds contain Reelspace's public Google Desktop OAuth client ID. Forks can replace it at compile time with `REELSPACE_YOUTUBE_CLIENT_ID`; a Google Desktop client secret is intentionally neither required nor accepted by the app. See [YouTube archive authentication](docs/youtube-archive.md).
 
 The FFmpeg preparation script downloads one pinned BtbN Windows build, verifies its archive and executable hashes, and stages only FFmpeg, FFprobe, and their license for packaging. See [third-party notices](THIRD_PARTY_NOTICES.md).
 

@@ -139,8 +139,7 @@ export const api = {
   openRemoteCopy: (mediaId: string) => invokeCommand<void>("open_remote_copy", { mediaId }),
   repairLibrary: () => invokeCommand<RepairSummary>("repair_library"),
   getArchiveAccount: () => invokeCommand<ArchiveAccount | null>("get_archive_account"),
-  connectYouTube: (clientId: string, clientSecret: string) =>
-    invokeCommand<ArchiveAccount>("connect_youtube", { clientId, clientSecret }),
+  connectYouTube: () => invokeCommand<ArchiveAccount>("connect_youtube"),
   disconnectYouTube: () => invokeCommand<void>("disconnect_youtube"),
   deleteYouTubeRemote: (mediaId: string) =>
     invokeCommand<void>("delete_youtube_remote", { mediaId }),

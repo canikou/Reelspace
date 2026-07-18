@@ -21,7 +21,7 @@ export function SettingsPage({
   onImportData: (path: string) => Promise<LibraryDataImportSummary>;
   recorders?: RecorderApp[];
   archiveAccount?: ArchiveAccount | null;
-  onConnectYouTube?: (clientId: string, clientSecret: string) => Promise<unknown>;
+  onConnectYouTube?: () => Promise<unknown>;
   onDisconnectYouTube?: () => Promise<void>;
 }) {
   const [sourceFolders, setSourceFolders] = useState(snapshot.settings.sourceFolders.join("\n"));
@@ -40,8 +40,6 @@ export function SettingsPage({
   const [automaticallyArchiveClips, setAutomaticallyArchiveClips] = useState(snapshot.settings.automaticallyArchiveClips ?? false);
   const [keepLocalClips, setKeepLocalClips] = useState(snapshot.settings.keepLocalClips ?? true);
   const [pauseUploadsWhileRecording, setPauseUploadsWhileRecording] = useState(snapshot.settings.pauseUploadsWhileRecording ?? true);
-  const [youtubeClientId, setYouTubeClientId] = useState("");
-  const [youtubeClientSecret, setYouTubeClientSecret] = useState("");
   const [youtubeBusy, setYouTubeBusy] = useState(false);
   const [maintenanceStatus, setMaintenanceStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -245,10 +243,8 @@ export function SettingsPage({
       <section className="settings-panel archive-account-panel">
         <h2>YouTube archive</h2>
         {archiveAccount ? <><div className="account-state"><AppIcon name="archive" size={18} /><div><strong>{archiveAccount.displayName}</strong><span>Connected · private uploads only</span></div></div><button className="secondary-button" disabled={youtubeBusy} onClick={async () => { setYouTubeBusy(true); setError(null); try { await onDisconnectYouTube(); } catch (reason) { setError(normalizeAppError(reason).message); } finally { setYouTubeBusy(false); } }}>Disconnect YouTube</button></> : <>
-          <p className="muted">Create a Google Cloud OAuth client of type <strong>Desktop app</strong>, enable YouTube Data API v3, and add yourself as a test user. Credentials and refresh tokens are stored in Windows Credential Manager, never SQLite.</p>
-          <label>Desktop OAuth client ID<input autoComplete="off" value={youtubeClientId} onChange={(event) => setYouTubeClientId(event.target.value)} placeholder="123…apps.googleusercontent.com" /></label>
-          <label>Desktop OAuth client secret<input type="password" autoComplete="off" value={youtubeClientSecret} onChange={(event) => setYouTubeClientSecret(event.target.value)} /></label>
-          <button className="primary-button" disabled={youtubeBusy || !youtubeClientId || !youtubeClientSecret} onClick={async () => { setYouTubeBusy(true); setError(null); try { await onConnectYouTube(youtubeClientId.trim(), youtubeClientSecret); setYouTubeClientSecret(""); } catch (reason) { setError(normalizeAppError(reason).message); } finally { setYouTubeBusy(false); } }}><AppIcon name="archive" size={17} />{youtubeBusy ? "Waiting for Google…" : "Connect YouTube"}</button>
+          <p className="muted">Connect your Google account in the browser. Reelspace requests access only for private YouTube archival and stores your sign-in tokens in Windows Credential Manager.</p>
+          <button className="primary-button" disabled={youtubeBusy} onClick={async () => { setYouTubeBusy(true); setError(null); try { await onConnectYouTube(); } catch (reason) { setError(normalizeAppError(reason).message); } finally { setYouTubeBusy(false); } }}><AppIcon name="archive" size={17} />{youtubeBusy ? "Waiting for Google…" : "Connect YouTube"}</button>
         </>}
       </section>
       <section className="settings-panel">

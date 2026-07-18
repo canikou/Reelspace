@@ -22,12 +22,16 @@ use url::Url;
 const CREDENTIAL_SERVICE: &str = "Reelspace Archive";
 const CREDENTIAL_ACCOUNT: &str = "youtube-oauth";
 const YOUTUBE_SCOPE: &str = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly";
+const DEFAULT_CLIENT_ID: &str =
+    "213662861772-slkhvmapt8hpv7r6f1ll3tv4gvcnfcd5.apps.googleusercontent.com";
+const BUNDLED_CLIENT_ID: Option<&str> = option_env!("REELSPACE_YOUTUBE_CLIENT_ID");
 const UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredCredentials {
     client_id: String,
-    client_secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_secret: Option<String>,
     refresh_token: String,
     access_token: String,
     expires_at: i64,
@@ -194,24 +198,18 @@ pub fn get_archive_account(state: State<'_, AppState>) -> AppResult<Option<Archi
 }
 
 #[tauri::command]
-pub async fn connect_youtube(
-    state: State<'_, AppState>,
-    client_id: String,
-    client_secret: String,
-) -> AppResult<ArchiveAccount> {
-    validate_oauth_client(&client_id, &client_secret)?;
+pub async fn connect_youtube(state: State<'_, AppState>) -> AppResult<ArchiveAccount> {
+    let client_id = bundled_oauth_client_id()?;
     let runtime = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        connect_youtube_inner(&runtime, client_id, client_secret)
-    })
-    .await
-    .map_err(|error| {
-        app_error(
-            ErrorCode::Internal,
-            "The YouTube connection task stopped unexpectedly",
-        )
-        .with_detail(error.to_string())
-    })?
+    tauri::async_runtime::spawn_blocking(move || connect_youtube_inner(&runtime, client_id))
+        .await
+        .map_err(|error| {
+            app_error(
+                ErrorCode::Internal,
+                "The YouTube connection task stopped unexpectedly",
+            )
+            .with_detail(error.to_string())
+        })?
 }
 
 #[tauri::command]
@@ -294,11 +292,7 @@ pub(crate) fn start_youtube_worker(state: AppState) {
         .ok();
 }
 
-fn connect_youtube_inner(
-    state: &AppState,
-    client_id: String,
-    client_secret: String,
-) -> AppResult<ArchiveAccount> {
+fn connect_youtube_inner(state: &AppState, client_id: String) -> AppResult<ArchiveAccount> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| {
         app_error(
             ErrorCode::WindowsIntegrationFailed,
@@ -345,7 +339,6 @@ fn connect_youtube_inner(
         .post("https://oauth2.googleapis.com/token")
         .form(&[
             ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
             ("code", code.as_str()),
             ("code_verifier", verifier.as_str()),
             ("grant_type", "authorization_code"),
@@ -362,7 +355,7 @@ fn connect_youtube_inner(
     })?;
     let credentials = StoredCredentials {
         client_id,
-        client_secret,
+        client_secret: None,
         refresh_token,
         access_token: token.access_token,
         expires_at: Utc::now().timestamp() + token.expires_in,
@@ -638,14 +631,17 @@ fn refresh_access_token(client: &Client, credentials: &mut StoredCredentials) ->
     if credentials.expires_at > Utc::now().timestamp() + 90 {
         return Ok(());
     }
+    let mut form = vec![
+        ("client_id", credentials.client_id.as_str()),
+        ("refresh_token", credentials.refresh_token.as_str()),
+        ("grant_type", "refresh_token"),
+    ];
+    if let Some(secret) = credentials.client_secret.as_deref() {
+        form.push(("client_secret", secret));
+    }
     let response = client
         .post("https://oauth2.googleapis.com/token")
-        .form(&[
-            ("client_id", credentials.client_id.as_str()),
-            ("client_secret", credentials.client_secret.as_str()),
-            ("refresh_token", credentials.refresh_token.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
+        .form(&form)
         .send()
         .map_err(network_error)?;
     let response = require_success(response, "Google sign-in expired; reconnect YouTube")?;
@@ -705,19 +701,31 @@ fn receive_oauth_callback(listener: TcpListener) -> AppResult<(String, String)> 
     }
 }
 
-fn validate_oauth_client(client_id: &str, secret: &str) -> AppResult<()> {
-    if client_id.len() > 300
-        || secret.len() > 300
-        || !client_id.ends_with(".apps.googleusercontent.com")
-        || secret.trim().is_empty()
-        || client_id
+fn bundled_oauth_client_id() -> AppResult<String> {
+    let client_id = BUNDLED_CLIENT_ID.unwrap_or(DEFAULT_CLIENT_ID).trim();
+    validate_oauth_client_id(client_id).map_err(|error| {
+        app_error(
+            ErrorCode::InvalidRequest,
+            "YouTube sign-in is not configured in this Reelspace build",
+        )
+        .with_detail(error.message)
+    })?;
+    Ok(client_id.to_owned())
+}
+
+fn validate_oauth_client_id(client_id: &str) -> AppResult<()> {
+    let prefix = client_id
+        .strip_suffix(".apps.googleusercontent.com")
+        .unwrap_or_default();
+    if client_id.is_empty()
+        || client_id.len() > 300
+        || client_id.trim() != client_id
+        || prefix.is_empty()
+        || !prefix
             .chars()
-            .chain(secret.chars())
-            .any(|ch| ch.is_control())
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     {
-        return Err(user_error(
-            "enter a valid Google Desktop OAuth client id and client secret",
-        ));
+        return Err(user_error("invalid Google Desktop OAuth client id"));
     }
     Ok(())
 }
@@ -836,8 +844,34 @@ mod tests {
         assert_eq!(retry_delay(99), 6 * 60 * 60);
     }
     #[test]
-    fn oauth_validation_rejects_web_clients_and_control_characters() {
-        assert!(validate_oauth_client("web.example", "secret").is_err());
-        assert!(validate_oauth_client("123.apps.googleusercontent.com", "bad\nsecret").is_err());
+    fn oauth_validation_accepts_only_well_formed_desktop_client_ids() {
+        assert!(validate_oauth_client_id("123-abc.apps.googleusercontent.com").is_ok());
+        for invalid in [
+            "",
+            "web.example",
+            ".apps.googleusercontent.com",
+            " 123.apps.googleusercontent.com",
+            "123.apps.googleusercontent.com ",
+            "123\n.apps.googleusercontent.com",
+            "123/abc.apps.googleusercontent.com",
+        ] {
+            assert!(
+                validate_oauth_client_id(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_stored_client_secrets_remain_readable() {
+        let credentials: StoredCredentials = serde_json::from_value(json!({
+            "client_id": "123.apps.googleusercontent.com",
+            "client_secret": "legacy-secret",
+            "refresh_token": "refresh",
+            "access_token": "access",
+            "expires_at": 1
+        }))
+        .unwrap();
+        assert_eq!(credentials.client_secret.as_deref(), Some("legacy-secret"));
     }
 }
