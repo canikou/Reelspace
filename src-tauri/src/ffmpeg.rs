@@ -2,12 +2,17 @@ use crate::error::{app_error, user_error, AppError, AppResult, ErrorCode};
 use crate::models::{AudioTrack, MediaMetadata, ProbeData, ToolHealth};
 use serde::Deserialize;
 use std::io::Read;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{path::BaseDirectory, AppHandle, Manager};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone)]
 pub struct Ffmpeg {
@@ -164,7 +169,7 @@ impl Ffmpeg {
                 "FFprobe is not available in the Reelspace installation",
             )
         })?;
-        let mut command = Command::new(ffprobe);
+        let mut command = media_command(ffprobe);
         command
             .args([
                 "-v",
@@ -249,7 +254,7 @@ impl Ffmpeg {
         }
         let temp_path = unique_audio_temp_path(output_path);
         let run = |codec_args: &[&str]| -> AppResult<ProcessResult> {
-            let mut command = Command::new(ffmpeg);
+            let mut command = media_command(ffmpeg);
             command.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]);
             command.arg(source);
             command.arg("-map").arg(format!("0:{stream_index}"));
@@ -331,7 +336,7 @@ impl Ffmpeg {
             ((end_seconds - start_seconds) * 4.0 + 60.0).clamp(120.0, 7_200.0),
         );
         let run = |video_args: &[&str]| -> AppResult<CapturedProcessResult> {
-            let mut command = Command::new(ffmpeg);
+            let mut command = media_command(ffmpeg);
             command.args(["-y", "-hide_banner", "-loglevel", "error", "-ss", &start]);
             command.arg("-i").arg(source);
             command.args(["-t", &duration]);
@@ -410,7 +415,7 @@ impl Ffmpeg {
 }
 
 fn thumbnail_command(ffmpeg: &Path, source: &Path, output_path: &Path, timestamp: &str) -> Command {
-    let mut command = Command::new(ffmpeg);
+    let mut command = media_command(ffmpeg);
     command.args([
         "-y",
         "-hide_banner",
@@ -432,6 +437,13 @@ fn thumbnail_command(ffmpeg: &Path, source: &Path, output_path: &Path, timestamp
         "3",
     ]);
     command.arg(output_path);
+    command
+}
+
+fn media_command(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     command
 }
 
@@ -732,6 +744,34 @@ fn parse_frame_rate(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn media_processes_are_created_without_a_console_window() {
+        const CHILD_MARKER: &str = "REELSPACE_NO_CONSOLE_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let console = unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() };
+            assert_eq!(console, std::ptr::null_mut());
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("current test executable");
+        let mut command = media_command(&executable);
+        let output = command
+            .env(CHILD_MARKER, "1")
+            .args([
+                "--exact",
+                "ffmpeg::tests::media_processes_are_created_without_a_console_window",
+                "--nocapture",
+            ])
+            .output()
+            .expect("spawn hidden child test");
+        assert!(
+            output.status.success(),
+            "hidden child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn thumbnail_source_is_an_explicit_ffmpeg_input() {
