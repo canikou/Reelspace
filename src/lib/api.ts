@@ -8,6 +8,8 @@ import type {
   AudioTrack,
   Collection,
   CreateClipRequest,
+  LibraryDataExportSummary,
+  LibraryDataImportSummary,
   MediaItem,
   MediaKind,
   StorageStats
@@ -89,6 +91,10 @@ export const api = {
   createCollection: (name: string) => invokeCommand<Collection[]>("create_collection", { name }),
   addToCollection: (collectionId: string, mediaId: string) =>
     invokeCommand<Collection[]>("add_to_collection", { collectionId, mediaId }),
+  exportLibraryData: (path: string) =>
+    invokeCommand<LibraryDataExportSummary>("export_library_data", { path }),
+  importLibraryData: (path: string) =>
+    invokeCommand<LibraryDataImportSummary>("import_library_data", { path }),
   createClip: (request: CreateClipRequest) => invokeCommand<MediaItem>("create_clip", { request }),
   revealInExplorer: (id: string) => invokeCommand<void>("reveal_in_explorer", { id }),
   getStorageStats: () => invokeCommand<StorageStats>("get_storage_stats"),

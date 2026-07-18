@@ -25,6 +25,26 @@ pub struct ThumbnailJob {
     pub attempts: u32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PortableMediaUpdate {
+    pub media_id: String,
+    pub tags: Vec<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PortableCollectionUpdate {
+    pub id: String,
+    pub name: String,
+    pub media_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PortableImportChanges {
+    pub collections_created: u64,
+    pub memberships_added: u64,
+}
+
 const DATABASE_SCHEMA_VERSION: i64 = 3;
 pub const PROBE_SCHEMA_VERSION: i64 = 1;
 
@@ -573,6 +593,63 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn apply_portable_import(
+        &self,
+        restored_items: &[MediaItem],
+        updates: &[PortableMediaUpdate],
+        collections: &[PortableCollectionUpdate],
+        imported_at: i64,
+    ) -> AppResult<PortableImportChanges> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for item in restored_items {
+            upsert_media_on(&transaction, item)?;
+        }
+        for update in updates {
+            let changed = transaction.execute(
+                "UPDATE media SET tags_json = ?1, notes = ?2 WHERE id = ?3",
+                params![
+                    serde_json::to_string(&update.tags)?,
+                    update.notes,
+                    update.media_id
+                ],
+            )?;
+            if changed != 1 {
+                return Err(user_error("an imported media reference became unavailable"));
+            }
+        }
+        let mut changes = PortableImportChanges::default();
+        for collection in collections {
+            let existing_name: Option<String> = transaction
+                .query_row(
+                    "SELECT name FROM collections WHERE id = ?1",
+                    [&collection.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if existing_name
+                .as_ref()
+                .is_some_and(|name| !name.eq_ignore_ascii_case(&collection.name))
+            {
+                return Err(user_error(
+                    "an imported collection identifier conflicts with local data",
+                ));
+            }
+            changes.collections_created += transaction.execute(
+                "INSERT OR IGNORE INTO collections (id, name, created_at) VALUES (?1, ?2, ?3)",
+                params![collection.id, collection.name, imported_at],
+            )? as u64;
+            for media_id in &collection.media_ids {
+                changes.memberships_added += transaction.execute(
+                    "INSERT OR IGNORE INTO collection_items (collection_id, media_id, added_at) VALUES (?1, ?2, ?3)",
+                    params![collection.id, media_id, imported_at],
+                )? as u64;
+            }
+        }
+        transaction.commit()?;
+        Ok(changes)
+    }
+
     pub fn delete_media(&self, id: &str) -> AppResult<()> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -661,12 +738,9 @@ fn upsert_media_on(conn: &Connection, item: &MediaItem) -> AppResult<()> {
           width = excluded.width,
           height = excluded.height,
           codec = excluded.codec,
-          tags_json = CASE WHEN media.tags_json = '[]' THEN excluded.tags_json ELSE media.tags_json END,
+          tags_json = media.tags_json,
           thumbnail_path = COALESCE(excluded.thumbnail_path, media.thumbnail_path),
-          notes = CASE
-            WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.notes
-            ELSE excluded.notes
-          END,
+          notes = media.notes,
           modified_at = excluded.modified_at,
           trim_start_seconds = CASE
             WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.trim_start_seconds
@@ -802,6 +876,31 @@ mod tests {
     }
 
     #[test]
+    fn scanner_upserts_preserve_explicitly_edited_raw_tags_and_notes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-edits-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        let original = item("C:\\captures\\edited.mp4", MediaKind::Raw);
+        db.upsert_media(&original).expect("insert");
+        db.update_tags(&original.id, &[]).expect("clear tags");
+        db.update_notes(&original.id, Some("keep this note"))
+            .expect("custom note");
+        let mut rescanned = original.clone();
+        rescanned.tags = vec!["inferred-again".into()];
+        rescanned.notes = None;
+        rescanned.modified_at += 1;
+        db.upsert_media(&rescanned).expect("rescan");
+        let stored = db.get_media(&original.id).expect("stored");
+        assert!(stored.tags.is_empty());
+        assert_eq!(stored.notes.as_deref(), Some("keep this note"));
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn batch_upserts_are_atomic_when_one_item_is_invalid() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -814,6 +913,34 @@ mod tests {
         conflicting.id = first.id.clone();
         assert!(db.upsert_media_batch(&[first, conflicting]).is_err());
         assert!(db.list_media(None).expect("rolled back").is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn portable_import_rolls_back_media_when_collection_data_conflicts() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-portable-atomic-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        let collection_id = "b".repeat(64);
+        db.create_collection(&collection_id, "Local", 1)
+            .expect("local collection");
+        let restored = item("C:\\captures\\restored.mp4", MediaKind::Raw);
+        let result = db.apply_portable_import(
+            &[restored],
+            &[],
+            &[PortableCollectionUpdate {
+                id: collection_id,
+                name: "Conflicting".into(),
+                media_ids: Vec::new(),
+            }],
+            2,
+        );
+        assert!(result.is_err());
+        assert!(db.list_media(None).expect("rolled back media").is_empty());
         drop(db);
         let _ = std::fs::remove_file(path);
     }

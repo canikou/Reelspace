@@ -92,6 +92,23 @@ export interface Collection {
   itemCount: number;
 }
 
+export interface LibraryDataExportSummary {
+  items: number;
+  collections: number;
+  bytes: number;
+}
+
+export interface LibraryDataImportSummary {
+  matchedItems: number;
+  restoredItems: number;
+  unmatchedItems: number;
+  updatedItems: number;
+  tagConflicts: number;
+  noteConflicts: number;
+  collectionsCreated: number;
+  membershipsAdded: number;
+}
+
 export interface CreateClipRequest {
   sourceId: string;
   sessionId?: string | null;

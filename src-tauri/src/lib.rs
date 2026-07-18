@@ -6,6 +6,7 @@ pub mod ffmpeg;
 mod jobs;
 pub mod media;
 pub mod models;
+mod portability;
 mod recovery;
 mod state;
 mod storage;
@@ -58,6 +59,8 @@ pub fn run() -> error::AppResult<()> {
             list_collection_media,
             create_collection,
             add_to_collection,
+            export_library_data,
+            import_library_data,
             create_clip,
             reveal_in_explorer,
             get_storage_stats,

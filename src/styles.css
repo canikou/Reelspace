@@ -185,6 +185,7 @@ input::placeholder, textarea::placeholder { color: #625c70; }
 input:focus, textarea:focus, select:focus { border-color: var(--accent-solid); outline: 2px solid rgb(185 167 255 / 12%); }
 .tool-health { display: grid; gap: 7px; padding: 11px; border: 1px solid #6b3038; border-radius: var(--radius-sm); color: #ffd4d6; background: var(--danger-soft); font-size: 11px; }
 .tool-health.ready { border-color: #275c49; color: #d9fff0; background: var(--success-soft); }
+.data-status { padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--muted); background: var(--canvas); font-size: 11px; line-height: 1.45; }
 .settings-actions { align-self: start; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 22px; background: rgb(4 3 8 / 78%); backdrop-filter: blur(7px); }

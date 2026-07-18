@@ -14,6 +14,7 @@ Reelspace is split into small, agent-friendly compartments.
 - `commands.rs` exposes Tauri commands and keeps business logic out of command handlers.
 - `db.rs` owns transactional SQLite migrations, organization data, probe-cache records, and persisted thumbnail jobs.
 - `media.rs` owns fingerprinted incremental scanning, tag inference, atomic thumbnails, and clip item construction.
+- `portability.rs` owns the versioned metadata-only library archive, strict import validation, conservative path remapping, and conflict-aware metadata merging.
 - `ffmpeg.rs` owns FFmpeg/FFprobe discovery and process execution.
 - `storage.rs` owns storage accounting and raw cleanup candidate ordering.
 - `explorer.rs` owns Windows Explorer reveal/select behavior.

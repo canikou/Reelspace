@@ -202,12 +202,23 @@ export function App() {
           />
         ) : null}
         {page === "settings" && snapshot ? (
-          <SettingsPage snapshot={snapshot} onSave={async (settings) => {
-            const next = await api.saveSettings(settings);
-            setSnapshot(next);
-            await refresh();
-            setNotice("Settings saved");
-          }} />
+          <SettingsPage
+            snapshot={snapshot}
+            onSave={async (settings) => {
+              const next = await api.saveSettings(settings);
+              setSnapshot(next);
+              await refresh();
+              setNotice("Settings saved");
+            }}
+            onExportData={api.exportLibraryData}
+            onImportData={async (path) => {
+              const summary = await api.importLibraryData(path);
+              await refresh();
+              if (selectedCollection) await openCollection(selectedCollection);
+              setNotice("Library data imported");
+              return summary;
+            }}
+          />
         ) : null}
       </main>
 

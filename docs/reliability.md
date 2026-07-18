@@ -6,6 +6,8 @@ Reelspace stores its SQLite database and disposable media caches in the Windows 
 
 User organization data lives in the `media`, `collections`, and `collection_items` tables. FFprobe responses and thumbnail job state are separate and disposable. Clearing a thumbnail or audio-preview cache must never remove raw recordings, generated clips, tags, notes, or collections.
 
+Portable library-data exports are bounded, versioned JSON and contain no media or cache bytes. Import validates every identifier, path, relative path, numeric field, tag, note, collection, and membership before opening a write transaction. Exact paths are preferred, source-relative paths permit moving a library between roots, and filename/size/duration fallback is accepted only when it identifies one local record. Missing and ambiguous references remain unmatched rather than creating phantom media. Imports merge tags and collection membership; existing tags win if the combined application limit is reached, and a differing existing note wins. Both cases are counted and reported.
+
 ## Scanning
 
 Each recording fingerprint contains a normalized canonical path, file size, and nanosecond modification time. A matching probe-schema version is also required before FFprobe data is reused. A routine scan:

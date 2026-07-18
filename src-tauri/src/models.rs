@@ -111,6 +111,27 @@ pub struct Collection {
     pub item_count: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDataExportSummary {
+    pub items: u64,
+    pub collections: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDataImportSummary {
+    pub matched_items: u64,
+    pub restored_items: u64,
+    pub unmatched_items: u64,
+    pub updated_items: u64,
+    pub tag_conflicts: u64,
+    pub note_conflicts: u64,
+    pub collections_created: u64,
+    pub memberships_added: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateClipRequest {

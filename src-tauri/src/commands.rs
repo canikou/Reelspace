@@ -3,8 +3,9 @@ use crate::explorer;
 use crate::media;
 use crate::models::{
     AppSettings, AppSnapshot, AudioPreviewResult, AudioTrack, Collection, CreateClipRequest,
-    MediaItem, MediaKind, StorageStats,
+    LibraryDataExportSummary, LibraryDataImportSummary, MediaItem, MediaKind, StorageStats,
 };
+use crate::portability;
 use crate::state::AppState;
 use crate::storage;
 use chrono::Utc;
@@ -31,7 +32,9 @@ where
 {
     let queue = match operation {
         "clip_export" => state.export_jobs.clone(),
-        "library_scan" | "thumbnail_repair" => state.background_jobs.clone(),
+        "library_scan" | "thumbnail_repair" | "library_data_export" | "library_data_import" => {
+            state.background_jobs.clone()
+        }
         _ => state.media_jobs.clone(),
     };
     let telemetry = state.telemetry.clone();
@@ -521,6 +524,89 @@ pub fn add_to_collection(
         .db
         .add_to_collection(&collection_id, &media_id, Utc::now().timestamp())?;
     state.db.list_collections()
+}
+
+#[tauri::command]
+pub async fn export_library_data(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<LibraryDataExportSummary> {
+    let runtime = state.inner().clone();
+    let job_runtime = runtime.clone();
+    run_media_job(
+        &runtime,
+        "library_data_export",
+        json!({}),
+        None,
+        move || export_library_data_inner(&job_runtime, &path),
+    )
+    .await
+}
+
+fn export_library_data_inner(state: &AppState, path: &str) -> AppResult<LibraryDataExportSummary> {
+    let _index_guard = state
+        .media_index_lock
+        .lock()
+        .map_err(|_| user_error("media index lock was poisoned"))?;
+    let settings = state.db.load_settings()?;
+    let summary =
+        portability::export_library_data(&state.db, &settings, &state.data_dir, Path::new(&path))?;
+    state.telemetry.event(
+        "info",
+        "library.data.exported",
+        json!({
+            "items": summary.items,
+            "collections": summary.collections,
+            "bytes": summary.bytes,
+        }),
+    );
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn import_library_data(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<LibraryDataImportSummary> {
+    let runtime = state.inner().clone();
+    let job_runtime = runtime.clone();
+    let summary = run_media_job(
+        &runtime,
+        "library_data_import",
+        json!({}),
+        None,
+        move || import_library_data_inner(&job_runtime, &path),
+    )
+    .await?;
+    start_thumbnail_worker(runtime);
+    Ok(summary)
+}
+
+fn import_library_data_inner(state: &AppState, path: &str) -> AppResult<LibraryDataImportSummary> {
+    let _index_guard = state
+        .media_index_lock
+        .lock()
+        .map_err(|_| user_error("media index lock was poisoned"))?;
+    let settings = state.db.load_settings()?;
+    let summary =
+        portability::import_library_data(&state.db, &settings, &state.data_dir, Path::new(&path))?;
+    let queued_thumbnails = queue_missing_thumbnails(state, 100, false)?;
+    state.telemetry.event(
+        "info",
+        "library.data.imported",
+        json!({
+            "matchedItems": summary.matched_items,
+            "restoredItems": summary.restored_items,
+            "unmatchedItems": summary.unmatched_items,
+            "updatedItems": summary.updated_items,
+            "tagConflicts": summary.tag_conflicts,
+            "noteConflicts": summary.note_conflicts,
+            "collectionsCreated": summary.collections_created,
+            "membershipsAdded": summary.memberships_added,
+            "queuedThumbnails": queued_thumbnails,
+        }),
+    );
+    Ok(summary)
 }
 
 #[tauri::command]

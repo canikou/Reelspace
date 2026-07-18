@@ -1,15 +1,20 @@
-import { FolderPlus, Save } from "lucide-react";
+import { Download, FolderPlus, Save, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { pickFolder } from "../lib/dialog";
+import { normalizeAppError } from "../lib/api";
+import { pickFolder, pickLibraryDataExport, pickLibraryDataImport } from "../lib/dialog";
 import { formatBytes } from "../lib/format";
-import type { AppSettings, AppSnapshot } from "../lib/types";
+import type { AppSettings, AppSnapshot, LibraryDataExportSummary, LibraryDataImportSummary } from "../lib/types";
 
 export function SettingsPage({
   snapshot,
-  onSave
+  onSave,
+  onExportData,
+  onImportData
 }: {
   snapshot: AppSnapshot;
   onSave: (settings: AppSettings) => Promise<void>;
+  onExportData: (path: string) => Promise<LibraryDataExportSummary>;
+  onImportData: (path: string) => Promise<LibraryDataImportSummary>;
 }) {
   const [sourceFolders, setSourceFolders] = useState(snapshot.settings.sourceFolders.join("\n"));
   const [workingFolder, setWorkingFolder] = useState(snapshot.settings.workingFolder ?? "");
@@ -20,6 +25,8 @@ export function SettingsPage({
   const [threshold, setThreshold] = useState(String(snapshot.settings.cleanupThresholdPercent));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dataBusy, setDataBusy] = useState<"export" | "import" | null>(null);
+  const [dataStatus, setDataStatus] = useState<string | null>(null);
   const saveInFlight = useRef(false);
 
   useEffect(() => {
@@ -68,6 +75,42 @@ export function SettingsPage({
   async function chooseClipFolder() {
     const folder = await pickFolder();
     if (folder) setClipFolder(folder);
+  }
+
+  async function exportData() {
+    setError(null);
+    setDataStatus(null);
+    try {
+      const path = await pickLibraryDataExport();
+      if (!path) return;
+      setDataBusy("export");
+      const summary = await onExportData(path);
+      setDataStatus(`Exported ${summary.items} media reference${summary.items === 1 ? "" : "s"} and ${summary.collections} collection${summary.collections === 1 ? "" : "s"} (${formatBytes(summary.bytes)}).`);
+    } catch (reason) {
+      setError(normalizeAppError(reason).message);
+    } finally {
+      setDataBusy(null);
+    }
+  }
+
+  async function importData() {
+    setError(null);
+    setDataStatus(null);
+    try {
+      const path = await pickLibraryDataImport();
+      if (!path) return;
+      if (!window.confirm("Import this Reelspace data archive? Tags and collection membership will be merged. Existing notes are preserved when they conflict.")) return;
+      setDataBusy("import");
+      const summary = await onImportData(path);
+      const unresolved = summary.unmatchedItems ? ` ${summary.unmatchedItems} reference${summary.unmatchedItems === 1 ? " was" : "s were"} not matched to a local file.` : "";
+      const tagConflicts = summary.tagConflicts ? ` ${summary.tagConflicts} item${summary.tagConflicts === 1 ? " exceeded" : "s exceeded"} the tag limit; existing tags were prioritized.` : "";
+      const conflicts = summary.noteConflicts ? ` ${summary.noteConflicts} existing note conflict${summary.noteConflicts === 1 ? " was" : "s were"} preserved.` : "";
+      setDataStatus(`Imported metadata for ${summary.updatedItems} item${summary.updatedItems === 1 ? "" : "s"}; matched ${summary.matchedItems} and restored ${summary.restoredItems}.${unresolved}${tagConflicts}${conflicts}`);
+    } catch (reason) {
+      setError(normalizeAppError(reason).message);
+    } finally {
+      setDataBusy(null);
+    }
   }
 
   return (
@@ -127,6 +170,19 @@ export function SettingsPage({
             <code>{snapshot.ffmpeg.ffprobePath ?? "ffprobe.exe not found"}</code>
           </details>
         </div>
+      </section>
+      <section className="settings-panel">
+        <h2>Library data</h2>
+        <p className="muted">Move tags, notes, collections, and clip references without copying video, thumbnails, or previews.</p>
+        <button className="secondary-button" onClick={exportData} disabled={dataBusy !== null} title="Export portable library data">
+          <Download size={17} />
+          {dataBusy === "export" ? "Exporting..." : "Export Library Data"}
+        </button>
+        <button className="secondary-button" onClick={importData} disabled={dataBusy !== null} title="Import portable library data">
+          <Upload size={17} />
+          {dataBusy === "import" ? "Importing..." : "Import Library Data"}
+        </button>
+        {dataStatus ? <p className="data-status">{dataStatus}</p> : null}
       </section>
       <div className="settings-actions">
         {error ? <div className="inline-error">{error}</div> : null}
