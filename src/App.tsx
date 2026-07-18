@@ -7,10 +7,12 @@ import { SetupPrompt } from "./components/SetupPrompt";
 import { Sidebar, type PageKey } from "./components/Sidebar";
 import { TextEditorDialog } from "./components/TextEditorDialog";
 import { TrimModal } from "./components/TrimModal";
+import { UpdatePrompt } from "./components/UpdatePrompt";
 import { api, normalizeAppError } from "./lib/api";
 import { pickFolder } from "./lib/dialog";
 import { formatBytes } from "./lib/format";
 import type { AppSnapshot, Collection, MediaItem } from "./lib/types";
+import { checkForUpdate, dismissUpdate, downloadUpdate, installUpdate, type UpdateViewState } from "./lib/updater";
 import { ClipsPage } from "./pages/ClipsPage";
 import { CollectionsPage } from "./pages/CollectionsPage";
 import { GalleryPage } from "./pages/GalleryPage";
@@ -38,6 +40,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [setupDismissed, setSetupDismissed] = useState(false);
+  const [updateState, setUpdateState] = useState<UpdateViewState>({ phase: "idle" });
   const scanInFlight = useRef(false);
   const lastScanAt = useRef(0);
   const refreshGeneration = useRef(0);
@@ -70,6 +73,32 @@ export function App() {
   useEffect(() => {
     refresh().catch(showError);
   }, [refresh, showError]);
+
+  useEffect(() => {
+    const theme = snapshot?.settings.theme ?? "system";
+    if (theme === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+  }, [snapshot?.settings.theme]);
+
+  const runUpdateCheck = useCallback(async (manual = false) => {
+    setUpdateState({ phase: "checking" });
+    try {
+      const next = await checkForUpdate({ manual, includePrerelease: snapshot?.settings.includePrereleaseUpdates ?? true });
+      setUpdateState(next);
+      if (next.phase === "available" && snapshot?.settings.automaticallyDownloadUpdates) {
+        setUpdateState(await downloadUpdate(setUpdateState));
+      }
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "The update channel could not be reached";
+      setUpdateState(manual ? { phase: "error", version: snapshot?.version, error: message } : { phase: "idle" });
+    }
+  }, [snapshot?.settings.automaticallyDownloadUpdates, snapshot?.settings.includePrereleaseUpdates, snapshot?.version]);
+
+  useEffect(() => {
+    if (!snapshot?.settings.automaticallyCheckUpdates) return;
+    const timeout = window.setTimeout(() => runUpdateCheck(false), 4_000);
+    return () => window.clearTimeout(timeout);
+  }, [runUpdateCheck, snapshot?.settings.automaticallyCheckUpdates]);
 
   const actions = useMemo(
     () => ({
@@ -176,6 +205,9 @@ export function App() {
           </div>
           <div className="topbar-actions">
             {busy ? <span className="activity-pill"><AppIcon name="refresh" size={14} className="spin" /> Scanning</span> : null}
+            <button className="icon-button" onClick={() => runUpdateCheck(true)} disabled={updateState.phase === "checking" || updateState.phase === "downloading"} aria-label="Check for updates" title="Check for updates">
+              <AppIcon name="update" size={18} className={updateState.phase === "checking" ? "spin" : undefined} />
+            </button>
             <button className="icon-button" onClick={() => scan({ force: true })} disabled={busy || !rootsKey} aria-label="Refresh media" title="Refresh media">
               <AppIcon name="refresh" size={18} className={busy ? "spin" : undefined} />
             </button>
@@ -183,6 +215,17 @@ export function App() {
         </header>
         {error ? <div className="error-banner"><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error" title="Dismiss error"><AppIcon name="close" size={16} /></button></div> : null}
         {notice ? <div className="toast"><AppIcon name="success" size={17} /> {notice}</div> : null}
+        <UpdatePrompt
+          state={updateState}
+          activeWork={busy || trimming !== null}
+          onDownload={async () => {
+            try { setUpdateState(await downloadUpdate(setUpdateState)); }
+            catch (reason) { setUpdateState((current) => ({ ...current, phase: "error", error: reason instanceof Error ? reason.message : "Update download failed" })); }
+          }}
+          onInstall={() => installUpdate().catch(showError)}
+          onLater={() => { dismissUpdate(updateState.version).catch(() => undefined); setUpdateState({ phase: "idle" }); }}
+          onSkip={() => { dismissUpdate(updateState.version, true).catch(() => undefined); setUpdateState({ phase: "idle" }); }}
+        />
         {!snapshot && !error ? <div className="loading-grid"><i /><i /><i /><i /></div> : null}
         {snapshot && !snapshot.settings.sourceFolders.length && setupDismissed ? (
           <button className="setup-reminder" onClick={chooseInitialSourceFolder}><AppIcon name="add" size={18} /><span>Add a capture folder to begin</span></button>

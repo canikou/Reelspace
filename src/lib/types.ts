@@ -41,6 +41,10 @@ export interface AppSettings {
   clipFolder?: string | null;
   storageLimitBytes?: number | null;
   cleanupThresholdPercent: number;
+  theme?: "system" | "dark" | "light";
+  automaticallyCheckUpdates?: boolean;
+  automaticallyDownloadUpdates?: boolean;
+  includePrereleaseUpdates?: boolean;
 }
 
 export interface ToolHealth {

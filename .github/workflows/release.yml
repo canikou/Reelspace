@@ -77,6 +77,8 @@ jobs:
         run: ./scripts/test-release-media.ps1
 
       - name: Build Tauri NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: pnpm tauri:build
 
       - name: Verify packaged Windows executable metadata
@@ -100,12 +102,33 @@ jobs:
           $checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksumPath = "$installer.sha256"
           "$checksum  $fileName" | Set-Content -LiteralPath $checksumPath -Encoding ascii
+          $signatures = @(Get-ChildItem -LiteralPath "src-tauri/target/release/bundle/nsis" -File -Filter "*.sig")
+          if ($signatures.Count -ne 1) {
+            throw "Expected exactly one Tauri updater signature; found $($signatures.Count)."
+          }
+          $signaturePath = "$installer.sig"
+          Copy-Item -LiteralPath $signatures[0].FullName -Destination $signaturePath
+          $releaseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$fileName"
+          $latestPath = Join-Path $releaseDirectory "latest.json"
+          @{
+            version = $version
+            notes = (Get-Content -LiteralPath "docs/releases/$env:GITHUB_REF_NAME.md" -Raw)
+            pub_date = (Get-Date).ToUniversalTime().ToString("o")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+                url = $releaseUrl
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $latestPath -Encoding utf8
           $notes = "docs/releases/$($env:GITHUB_REF_NAME).md"
           if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
             throw "Release notes are missing: $notes"
           }
           "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "checksum=$checksumPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "signature=$signaturePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "latest=$latestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "notes=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "prerelease=$($version.Contains('-').ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -115,18 +138,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INSTALLER: ${{ steps.package.outputs.installer }}
           CHECKSUM: ${{ steps.package.outputs.checksum }}
+          SIGNATURE: ${{ steps.package.outputs.signature }}
+          LATEST: ${{ steps.package.outputs.latest }}
           NOTES: ${{ steps.package.outputs.notes }}
           IS_PRERELEASE: ${{ steps.package.outputs.prerelease }}
         run: |
           $title = "Reelspace $($env:GITHUB_REF_NAME.Substring(1))"
           if (gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY 2>$null) {
             gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title $title --notes-file $env:NOTES
-            gh release upload $env:GITHUB_REF_NAME $env:INSTALLER $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $env:GITHUB_REF_NAME $env:INSTALLER $env:CHECKSUM $env:SIGNATURE $env:LATEST --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            $arguments = @("release", "create", $env:GITHUB_REF_NAME, $env:INSTALLER, $env:CHECKSUM, "--repo", $env:GITHUB_REPOSITORY, "--verify-tag", "--title", $title, "--notes-file", $env:NOTES)
+            $arguments = @("release", "create", $env:GITHUB_REF_NAME, $env:INSTALLER, $env:CHECKSUM, $env:SIGNATURE, $env:LATEST, "--repo", $env:GITHUB_REPOSITORY, "--verify-tag", "--title", $title, "--notes-file", $env:NOTES)
             if ($env:IS_PRERELEASE -eq "true") {
               $arguments += "--prerelease"
             }
+            & gh @arguments
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Update signed updater channel
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.package.outputs.latest }}
+          IS_PRERELEASE: ${{ steps.package.outputs.prerelease }}
+        run: |
+          $channel = if ($env:IS_PRERELEASE -eq "true") { "updater-alpha" } else { "updater-stable" }
+          $title = if ($env:IS_PRERELEASE -eq "true") { "Reelspace Alpha Update Channel" } else { "Reelspace Stable Update Channel" }
+          if (gh release view $channel --repo $env:GITHUB_REPOSITORY 2>$null) {
+            gh release edit $channel --repo $env:GITHUB_REPOSITORY --title $title --notes "Machine-readable Reelspace update channel. Installers remain attached to their versioned releases."
+            gh release upload $channel $env:LATEST --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            $arguments = @("release", "create", $channel, $env:LATEST, "--repo", $env:GITHUB_REPOSITORY, "--target", "master", "--title", $title, "--notes", "Machine-readable Reelspace update channel. Installers remain attached to their versioned releases.")
+            if ($env:IS_PRERELEASE -eq "true") { $arguments += "--prerelease" }
             & gh @arguments
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }

@@ -23,6 +23,10 @@ export function SettingsPage({
     snapshot.settings.storageLimitBytes ? String(Math.round(snapshot.settings.storageLimitBytes / 1024 / 1024 / 1024)) : ""
   );
   const [threshold, setThreshold] = useState(String(snapshot.settings.cleanupThresholdPercent));
+  const [theme, setTheme] = useState(snapshot.settings.theme ?? "system");
+  const [automaticallyCheckUpdates, setAutomaticallyCheckUpdates] = useState(snapshot.settings.automaticallyCheckUpdates ?? true);
+  const [automaticallyDownloadUpdates, setAutomaticallyDownloadUpdates] = useState(snapshot.settings.automaticallyDownloadUpdates ?? false);
+  const [includePrereleaseUpdates, setIncludePrereleaseUpdates] = useState(snapshot.settings.includePrereleaseUpdates ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dataBusy, setDataBusy] = useState<"export" | "import" | null>(null);
@@ -35,6 +39,10 @@ export function SettingsPage({
     setClipFolder(snapshot.settings.clipFolder ?? "");
     setLimitGb(snapshot.settings.storageLimitBytes ? String(Math.round(snapshot.settings.storageLimitBytes / 1024 / 1024 / 1024)) : "");
     setThreshold(String(snapshot.settings.cleanupThresholdPercent));
+    setTheme(snapshot.settings.theme ?? "system");
+    setAutomaticallyCheckUpdates(snapshot.settings.automaticallyCheckUpdates ?? true);
+    setAutomaticallyDownloadUpdates(snapshot.settings.automaticallyDownloadUpdates ?? false);
+    setIncludePrereleaseUpdates(snapshot.settings.includePrereleaseUpdates ?? true);
   }, [snapshot]);
 
   async function save() {
@@ -48,7 +56,11 @@ export function SettingsPage({
         workingFolder: workingFolder.trim() || null,
         clipFolder: clipFolder.trim() || null,
         storageLimitBytes: limitGb ? Number(limitGb) * 1024 * 1024 * 1024 : null,
-        cleanupThresholdPercent: Math.max(50, Math.min(99, Number(threshold) || 90))
+        cleanupThresholdPercent: Math.max(50, Math.min(99, Number(threshold) || 90)),
+        theme,
+        automaticallyCheckUpdates,
+        automaticallyDownloadUpdates,
+        includePrereleaseUpdates
       });
     } catch (reason) {
       setError(String(reason));
@@ -170,6 +182,25 @@ export function SettingsPage({
             <code>{snapshot.ffmpeg.ffprobePath ?? "ffprobe.exe not found"}</code>
           </details>
         </div>
+      </section>
+      <section className="settings-panel">
+        <h2>Appearance</h2>
+        <label>
+          Theme
+          <select value={theme} onChange={(event) => setTheme(event.target.value as "system" | "dark" | "light")}>
+            <option value="system">Use Windows setting</option>
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+        </label>
+        <p className="muted">Icons and status treatments retain labels and contrast in both themes.</p>
+      </section>
+      <section className="settings-panel">
+        <h2>Updates</h2>
+        <label className="toggle-row"><input type="checkbox" checked={automaticallyCheckUpdates} onChange={(event) => setAutomaticallyCheckUpdates(event.target.checked)} /><span>Automatically check after startup</span></label>
+        <label className="toggle-row"><input type="checkbox" checked={automaticallyDownloadUpdates} onChange={(event) => setAutomaticallyDownloadUpdates(event.target.checked)} /><span>Download signed updates automatically</span></label>
+        <label className="toggle-row"><input type="checkbox" checked={includePrereleaseUpdates} onChange={(event) => setIncludePrereleaseUpdates(event.target.checked)} /><span>Include alpha and prerelease versions</span></label>
+        <p className="muted">Updates are verified with Reelspace's Tauri signing key before installation. Active FFmpeg work is never interrupted.</p>
       </section>
       <section className="settings-panel">
         <h2>Library data</h2>

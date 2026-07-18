@@ -26,6 +26,8 @@ pub fn run() -> error::AppResult<()> {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let state = AppState::new(app.handle())?;
             state.telemetry.event(

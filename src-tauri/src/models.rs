@@ -9,6 +9,10 @@ pub struct AppSettings {
     pub clip_folder: Option<String>,
     pub storage_limit_bytes: Option<u64>,
     pub cleanup_threshold_percent: u8,
+    pub theme: String,
+    pub automatically_check_updates: bool,
+    pub automatically_download_updates: bool,
+    pub include_prerelease_updates: bool,
 }
 
 impl Default for AppSettings {
@@ -19,6 +23,10 @@ impl Default for AppSettings {
             clip_folder: None,
             storage_limit_bytes: None,
             cleanup_threshold_percent: 90,
+            theme: "system".to_owned(),
+            automatically_check_updates: true,
+            automatically_download_updates: false,
+            include_prerelease_updates: true,
         }
     }
 }

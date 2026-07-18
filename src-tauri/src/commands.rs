@@ -814,6 +814,9 @@ fn resolve_clip_dir(settings: &AppSettings, data_dir: &Path) -> AppResult<PathBu
 }
 
 fn validate_settings(settings: &AppSettings) -> AppResult<()> {
+    if !matches!(settings.theme.as_str(), "system" | "dark" | "light") {
+        return Err(user_error("theme must be system, dark, or light"));
+    }
     if !(50..=99).contains(&settings.cleanup_threshold_percent) {
         return Err(user_error(
             "cleanup threshold must be between 50 and 99 percent",
