@@ -2,6 +2,7 @@ use crate::db::Database;
 use crate::error::AppResult;
 use crate::ffmpeg::Ffmpeg;
 use crate::jobs::{MediaJobQueue, PreviewCoordinator, ThumbnailScheduler};
+use crate::models::AppSettings;
 use crate::recovery::RecoveryJournal;
 use crate::telemetry::Telemetry;
 use directories::ProjectDirs;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub thumbnail_scheduler: Arc<ThumbnailScheduler>,
     pub telemetry: Arc<Telemetry>,
     pub recovery: Arc<RecoveryJournal>,
+    pub asset_scope: tauri::scope::fs::Scope,
 }
 
 impl AppState {
@@ -46,6 +48,14 @@ impl AppState {
         let (database, database_recovery) =
             Database::open_resilient(data_dir.join("reelspace.db"))?;
         let db = Arc::new(database);
+        let asset_scope = app.asset_protocol_scope();
+        authorize_asset_scope(
+            &asset_scope,
+            &db.load_settings()?,
+            &data_dir,
+            &thumbnail_dir,
+            &audio_preview_dir,
+        )?;
         if let Some(recovered) = database_recovery {
             telemetry.event(
                 "error",
@@ -81,8 +91,46 @@ impl AppState {
             thumbnail_scheduler: Arc::new(ThumbnailScheduler::default()),
             telemetry,
             recovery,
+            asset_scope,
         })
     }
+
+    pub fn authorize_settings_assets(&self, settings: &AppSettings) -> AppResult<()> {
+        authorize_asset_scope(
+            &self.asset_scope,
+            settings,
+            &self.data_dir,
+            &self.thumbnail_dir,
+            &self.audio_preview_dir,
+        )
+    }
+}
+
+fn authorize_asset_scope(
+    scope: &tauri::scope::fs::Scope,
+    settings: &AppSettings,
+    data_dir: &std::path::Path,
+    thumbnail_dir: &std::path::Path,
+    audio_preview_dir: &std::path::Path,
+) -> AppResult<()> {
+    let managed_directories = [
+        thumbnail_dir.to_path_buf(),
+        audio_preview_dir.to_path_buf(),
+        data_dir.join("clips"),
+    ];
+    for directory in managed_directories {
+        scope.allow_directory(directory, true)?;
+    }
+    for directory in settings
+        .source_folders
+        .iter()
+        .map(PathBuf::from)
+        .chain(settings.working_folder.as_ref().map(PathBuf::from))
+        .chain(settings.clip_folder.as_ref().map(PathBuf::from))
+    {
+        scope.allow_directory(directory, true)?;
+    }
+    Ok(())
 }
 
 fn fallback_data_dir() -> Result<PathBuf, std::io::Error> {

@@ -121,6 +121,7 @@ pub fn get_app_state(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> AppResult<AppSnapshot> {
     validate_settings(&settings)?;
+    state.authorize_settings_assets(&settings)?;
     state.db.save_settings(&settings)?;
     get_app_state(state)
 }
@@ -232,12 +233,15 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
         }
     }
     let scanned_count = scanned.len();
-    for item in &scanned {
-        let key = media::normalized_path_key(Path::new(&item.path));
-        if changed_path_keys.contains(&key) || !existing.contains_key(&key) {
-            state.db.upsert_media(item)?;
-        }
-    }
+    let changed_items = scanned
+        .iter()
+        .filter(|item| {
+            let key = media::normalized_path_key(Path::new(&item.path));
+            changed_path_keys.contains(&key) || !existing.contains_key(&key)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    state.db.upsert_media_batch(&changed_items)?;
     for item in existing_items {
         let path = Path::new(&item.path);
         if belongs_to_roots(path, &reachable_sources)
@@ -248,7 +252,7 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
             files_missing += 1;
         }
     }
-    let queued_thumbnails = queue_missing_thumbnails(state, 0)?;
+    let queued_thumbnails = queue_missing_thumbnails(state, 0, false)?;
     state.telemetry.event(
         "info",
         "library.scan.finished",
@@ -448,7 +452,7 @@ pub fn log_client_event(
 #[tauri::command]
 pub fn repair_thumbnails(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
     let runtime = state.inner().clone();
-    let queued = queue_missing_thumbnails(&runtime, 100)?;
+    let queued = queue_missing_thumbnails(&runtime, 100, true)?;
     runtime.telemetry.event(
         "info",
         "thumbnail.repair.queued",
@@ -771,6 +775,16 @@ fn validate_settings(settings: &AppSettings) -> AppResult<()> {
     {
         return Err(user_error("source folders cannot contain duplicates"));
     }
+    for (index, source) in settings.source_folders.iter().enumerate() {
+        if settings.source_folders.iter().skip(index + 1).any(|other| {
+            path_is_within(Path::new(source), Path::new(other))
+                || path_is_within(Path::new(other), Path::new(source))
+        }) {
+            return Err(user_error(
+                "source folders cannot overlap; configure only the common parent folder",
+            ));
+        }
+    }
     let outputs = output_roots(settings);
     for source in &settings.source_folders {
         let source_path = Path::new(source);
@@ -805,7 +819,11 @@ fn belongs_to_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path_is_within(path, root))
 }
 
-fn queue_missing_thumbnails(state: &AppState, priority: i64) -> AppResult<usize> {
+fn queue_missing_thumbnails(
+    state: &AppState,
+    priority: i64,
+    force_retry: bool,
+) -> AppResult<usize> {
     let items = state.db.list_media(None)?;
     let mut queued = 0;
     for item in items {
@@ -822,9 +840,12 @@ fn queue_missing_thumbnails(state: &AppState, priority: i64) -> AppResult<usize>
         if let Ok(fingerprint) = media::FileFingerprint::read(Path::new(&item.path)) {
             state
                 .db
-                .queue_thumbnail_job(&item, &fingerprint, priority)?;
+                .queue_thumbnail_job(&item, &fingerprint, priority, force_retry)?;
             queued += 1;
         }
+    }
+    if queued > 0 {
+        state.thumbnail_scheduler.notify_work();
     }
     Ok(queued)
 }
@@ -838,14 +859,27 @@ pub(crate) fn start_thumbnail_worker(state: AppState) {
         let worker_state = state.clone();
         let outcome =
             tauri::async_runtime::spawn_blocking(move || run_thumbnail_worker(&worker_state)).await;
-        if let Err(error) = outcome {
-            state.telemetry.event(
+        let completed_normally = matches!(outcome, Ok(Ok(())));
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => state.telemetry.event(
                 "error",
                 "thumbnail.worker.failed",
+                json!({ "code": error.code, "error": error.to_string() }),
+            ),
+            Err(error) => state.telemetry.event(
+                "error",
+                "thumbnail.worker.panicked",
                 json!({ "error": error.to_string() }),
-            );
+            ),
         }
         scheduler.finish();
+        if completed_normally
+            && !scheduler.cancelled().load(Ordering::Acquire)
+            && state.db.thumbnail_job_count().unwrap_or(0) > 0
+        {
+            start_thumbnail_worker(state);
+        }
     });
 }
 
@@ -863,11 +897,25 @@ fn run_thumbnail_worker(state: &AppState) -> AppResult<()> {
         .load(Ordering::Acquire)
     {
         let Some(job) = state.db.claim_thumbnail_job()? else {
-            break;
+            let Some(delay) = state.db.next_thumbnail_job_delay()? else {
+                break;
+            };
+            let delay = delay
+                .max(Duration::from_millis(10))
+                .min(Duration::from_secs(60));
+            if !state.thumbnail_scheduler.wait_for_work(delay) {
+                break;
+            }
+            continue;
         };
         let item = match state.db.get_media(&job.media_id) {
             Ok(item) => item,
-            Err(_) => continue,
+            Err(error) if error.code == ErrorCode::InvalidRequest => {
+                state.db.delete_thumbnail_job(&job.media_id)?;
+                failed += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
         };
         let source = PathBuf::from(&job.source_path);
         let fingerprint = match media::FileFingerprint::read(&source) {
@@ -883,7 +931,9 @@ fn run_thumbnail_worker(state: &AppState) -> AppResult<()> {
             }
         };
         if fingerprint.token() != job.source_fingerprint {
-            state.db.queue_thumbnail_job(&item, &fingerprint, 100)?;
+            state
+                .db
+                .queue_thumbnail_job(&item, &fingerprint, 100, false)?;
             continue;
         }
         let thumbnail_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1295,6 +1345,11 @@ mod tests {
             ..AppSettings::default()
         };
         assert!(validate_settings(&source_inside_output).is_err());
+        let overlapping_sources = AppSettings {
+            source_folders: vec!["C:\\captures".into(), "C:\\captures\\game".into()],
+            ..AppSettings::default()
+        };
+        assert!(validate_settings(&overlapping_sources).is_err());
         let device_path = AppSettings {
             source_folders: vec!["\\\\.\\PhysicalDrive0".into()],
             ..AppSettings::default()

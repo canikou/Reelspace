@@ -18,6 +18,8 @@ pub struct MediaJobPermit {
 pub struct ThumbnailScheduler {
     running: AtomicBool,
     shutdown: AtomicBool,
+    wake_generation: Mutex<u64>,
+    wake_signal: Condvar,
 }
 
 impl Default for ThumbnailScheduler {
@@ -25,6 +27,8 @@ impl Default for ThumbnailScheduler {
         Self {
             running: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            wake_generation: Mutex::new(0),
+            wake_signal: Condvar::new(),
         }
     }
 }
@@ -44,10 +48,38 @@ impl ThumbnailScheduler {
 
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.wake_signal.notify_all();
     }
 
     pub fn cancelled(&self) -> &AtomicBool {
         &self.shutdown
+    }
+
+    pub fn notify_work(&self) {
+        let mut generation = self
+            .wake_generation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *generation = generation.wrapping_add(1);
+        self.wake_signal.notify_all();
+    }
+
+    pub fn wait_for_work(&self, timeout: Duration) -> bool {
+        if self.shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        let generation = self
+            .wake_generation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let observed = *generation;
+        let _guard = self
+            .wake_signal
+            .wait_timeout_while(generation, timeout, |current| {
+                *current == observed && !self.shutdown.load(Ordering::Acquire)
+            })
+            .unwrap_or_else(|error| error.into_inner());
+        !self.shutdown.load(Ordering::Acquire)
     }
 }
 
@@ -211,5 +243,17 @@ mod tests {
         scheduler.finish();
         assert!(!scheduler.try_start());
         assert!(scheduler.cancelled().load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn thumbnail_scheduler_wakes_early_for_new_work() {
+        let scheduler = Arc::new(ThumbnailScheduler::default());
+        let waiter = Arc::clone(&scheduler);
+        let started = Instant::now();
+        let thread = std::thread::spawn(move || waiter.wait_for_work(Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(20));
+        scheduler.notify_work();
+        assert!(thread.join().expect("waiter"));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

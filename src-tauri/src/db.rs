@@ -5,6 +5,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -31,13 +32,7 @@ impl Database {
     pub fn open_resilient(path: PathBuf) -> AppResult<(Self, Option<DatabaseRecovery>)> {
         match Self::open(path.clone()) {
             Ok(database) => Ok((database, None)),
-            Err(error)
-                if path.is_file()
-                    && matches!(
-                        error.code,
-                        ErrorCode::DatabaseUnavailable | ErrorCode::DatabaseIntegrityFailed
-                    ) =>
-            {
+            Err(error) if path.is_file() && should_quarantine_database(error.code) => {
                 let backup_path = quarantine_database(&path)?;
                 match Self::open(path) {
                     Ok(database) => Ok((
@@ -286,6 +281,7 @@ impl Database {
         item: &MediaItem,
         fingerprint: &FileFingerprint,
         priority: i64,
+        force_retry: bool,
     ) -> AppResult<()> {
         let conn = self.conn()?;
         let source_fingerprint = fingerprint.token();
@@ -297,18 +293,25 @@ impl Database {
              ON CONFLICT(media_id) DO UPDATE SET
                source_fingerprint = excluded.source_fingerprint,
                state = CASE
+                 WHEN ?5 THEN 'queued'
                  WHEN thumbnail_jobs.source_fingerprint != excluded.source_fingerprint THEN 'queued'
                  WHEN thumbnail_jobs.state = 'permanent' THEN thumbnail_jobs.state
                  ELSE 'queued'
                END,
                attempts = CASE
+                 WHEN ?5 THEN 0
                  WHEN thumbnail_jobs.source_fingerprint != excluded.source_fingerprint THEN 0
                  ELSE thumbnail_jobs.attempts
                END,
                priority = MAX(thumbnail_jobs.priority, excluded.priority),
                next_attempt_at = CASE
+                 WHEN ?5 THEN 0
                  WHEN thumbnail_jobs.source_fingerprint != excluded.source_fingerprint THEN 0
                  ELSE thumbnail_jobs.next_attempt_at
+               END,
+               error_code = CASE
+                 WHEN ?5 OR thumbnail_jobs.source_fingerprint != excluded.source_fingerprint THEN NULL
+                 ELSE thumbnail_jobs.error_code
                END,
                updated_at = excluded.updated_at",
             params![
@@ -316,6 +319,7 @@ impl Database {
                 source_fingerprint,
                 priority.clamp(0, 100),
                 Utc::now().timestamp(),
+                force_retry,
             ],
         )?;
         Ok(())
@@ -376,7 +380,7 @@ impl Database {
         error_code: &str,
     ) -> AppResult<()> {
         let permanent = attempts >= 3;
-        let backoff_seconds = 2_i64.pow(attempts.min(6));
+        let backoff_seconds = retry_backoff_seconds(attempts);
         let conn = self.conn()?;
         conn.execute(
             "UPDATE thumbnail_jobs
@@ -390,6 +394,24 @@ impl Database {
                 media_id,
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn next_thumbnail_job_delay(&self) -> AppResult<Option<Duration>> {
+        let conn = self.conn()?;
+        let next_attempt: Option<i64> = conn.query_row(
+            "SELECT MIN(next_attempt_at) FROM thumbnail_jobs WHERE state IN ('queued', 'retry')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(next_attempt.map(|timestamp| {
+            Duration::from_secs(timestamp.saturating_sub(Utc::now().timestamp()).max(0) as u64)
+        }))
+    }
+
+    pub fn delete_thumbnail_job(&self, media_id: &str) -> AppResult<()> {
+        self.conn()?
+            .execute("DELETE FROM thumbnail_jobs WHERE media_id = ?1", [media_id])?;
         Ok(())
     }
 
@@ -436,64 +458,20 @@ impl Database {
 
     pub fn upsert_media(&self, item: &MediaItem) -> AppResult<()> {
         let conn = self.conn()?;
-        conn.execute(
-            r#"
-            INSERT INTO media (
-              id, kind, path, source_path, filename, file_size, duration_seconds,
-              width, height, codec, tags_json, notes, thumbnail_path, created_at,
-              modified_at, trim_start_seconds, trim_end_seconds
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-            ON CONFLICT(path) DO UPDATE SET
-              kind = CASE
-                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.kind
-                ELSE excluded.kind
-              END,
-              source_path = CASE
-                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.source_path
-                ELSE excluded.source_path
-              END,
-              filename = excluded.filename,
-              file_size = excluded.file_size,
-              duration_seconds = excluded.duration_seconds,
-              width = excluded.width,
-              height = excluded.height,
-              codec = excluded.codec,
-              tags_json = CASE WHEN media.tags_json = '[]' THEN excluded.tags_json ELSE media.tags_json END,
-              thumbnail_path = COALESCE(excluded.thumbnail_path, media.thumbnail_path),
-              notes = CASE
-                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.notes
-                ELSE excluded.notes
-              END,
-              modified_at = excluded.modified_at,
-              trim_start_seconds = CASE
-                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.trim_start_seconds
-                ELSE excluded.trim_start_seconds
-              END,
-              trim_end_seconds = CASE
-                WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.trim_end_seconds
-                ELSE excluded.trim_end_seconds
-              END
-            "#,
-            params![
-                item.id,
-                item.kind.as_str(),
-                item.path,
-                item.source_path,
-                item.filename,
-                item.file_size as i64,
-                item.duration_seconds,
-                item.width.map(|v| v as i64),
-                item.height.map(|v| v as i64),
-                item.codec,
-                serde_json::to_string(&item.tags)?,
-                item.notes,
-                item.thumbnail_path,
-                item.created_at,
-                item.modified_at,
-                item.trim_start_seconds,
-                item.trim_end_seconds
-            ],
-        )?;
+        upsert_media_on(&conn, item)?;
+        Ok(())
+    }
+
+    pub fn upsert_media_batch(&self, items: &[MediaItem]) -> AppResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for item in items {
+            upsert_media_on(&transaction, item)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -613,6 +591,14 @@ impl Database {
     }
 }
 
+fn retry_backoff_seconds(attempts: u32) -> i64 {
+    2_i64.pow(attempts.min(6))
+}
+
+fn should_quarantine_database(code: ErrorCode) -> bool {
+    code == ErrorCode::DatabaseIntegrityFailed
+}
+
 fn quarantine_database(path: &std::path::Path) -> AppResult<PathBuf> {
     let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
     let filename = path
@@ -650,6 +636,68 @@ fn probe_data_is_valid(data: &ProbeData) -> bool {
         && metadata.width.is_none_or(|value| value > 0)
         && metadata.height.is_none_or(|value| value > 0)
         && data.audio_tracks.len() <= 128
+}
+
+fn upsert_media_on(conn: &Connection, item: &MediaItem) -> AppResult<()> {
+    conn.execute(
+        r#"
+        INSERT INTO media (
+          id, kind, path, source_path, filename, file_size, duration_seconds,
+          width, height, codec, tags_json, notes, thumbnail_path, created_at,
+          modified_at, trim_start_seconds, trim_end_seconds
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        ON CONFLICT(path) DO UPDATE SET
+          kind = CASE
+            WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.kind
+            ELSE excluded.kind
+          END,
+          source_path = CASE
+            WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.source_path
+            ELSE excluded.source_path
+          END,
+          filename = excluded.filename,
+          file_size = excluded.file_size,
+          duration_seconds = excluded.duration_seconds,
+          width = excluded.width,
+          height = excluded.height,
+          codec = excluded.codec,
+          tags_json = CASE WHEN media.tags_json = '[]' THEN excluded.tags_json ELSE media.tags_json END,
+          thumbnail_path = COALESCE(excluded.thumbnail_path, media.thumbnail_path),
+          notes = CASE
+            WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.notes
+            ELSE excluded.notes
+          END,
+          modified_at = excluded.modified_at,
+          trim_start_seconds = CASE
+            WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.trim_start_seconds
+            ELSE excluded.trim_start_seconds
+          END,
+          trim_end_seconds = CASE
+            WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.trim_end_seconds
+            ELSE excluded.trim_end_seconds
+          END
+        "#,
+        params![
+            item.id,
+            item.kind.as_str(),
+            item.path,
+            item.source_path,
+            item.filename,
+            item.file_size as i64,
+            item.duration_seconds,
+            item.width.map(|v| v as i64),
+            item.height.map(|v| v as i64),
+            item.codec,
+            serde_json::to_string(&item.tags)?,
+            item.notes,
+            item.thumbnail_path,
+            item.created_at,
+            item.modified_at,
+            item.trim_start_seconds,
+            item.trim_end_seconds
+        ],
+    )?;
+    Ok(())
 }
 
 fn row_to_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaItem> {
@@ -749,6 +797,23 @@ mod tests {
         assert_eq!(stored.notes.as_deref(), Some("clip title"));
         assert_eq!(stored.trim_start_seconds, Some(1.0));
 
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn batch_upserts_are_atomic_when_one_item_is_invalid() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-batch-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        let first = item("C:\\captures\\first.mp4", MediaKind::Raw);
+        let mut conflicting = item("C:\\captures\\second.mp4", MediaKind::Raw);
+        conflicting.id = first.id.clone();
+        assert!(db.upsert_media_batch(&[first, conflicting]).is_err());
+        assert!(db.list_media(None).expect("rolled back").is_empty());
         drop(db);
         let _ = std::fs::remove_file(path);
     }
@@ -857,9 +922,9 @@ mod tests {
             size: media.file_size,
             modified_ns: 2,
         };
-        db.queue_thumbnail_job(&media, &fingerprint, 0)
+        db.queue_thumbnail_job(&media, &fingerprint, 0, false)
             .expect("queue");
-        db.queue_thumbnail_job(&media, &fingerprint, 100)
+        db.queue_thumbnail_job(&media, &fingerprint, 100, false)
             .expect("duplicate queue");
         assert_eq!(db.thumbnail_job_count().expect("count"), 1);
         let job = db.claim_thumbnail_job().expect("claim").expect("job");
@@ -867,15 +932,27 @@ mod tests {
         db.fail_thumbnail_job(&media.id, 3, "ffmpegFailed")
             .expect("permanent failure");
         assert_eq!(db.thumbnail_job_count().expect("permanent count"), 0);
-        db.queue_thumbnail_job(&media, &fingerprint, 100)
+        db.queue_thumbnail_job(&media, &fingerprint, 100, false)
             .expect("same fingerprint remains exhausted");
         assert!(db.claim_thumbnail_job().expect("claim exhausted").is_none());
+
+        db.queue_thumbnail_job(&media, &fingerprint, 100, true)
+            .expect("manual repair resets exhausted job");
+        assert_eq!(
+            db.claim_thumbnail_job()
+                .expect("forced claim")
+                .expect("forced job")
+                .attempts,
+            1
+        );
+        db.fail_thumbnail_job(&media.id, 3, "ffmpegFailed")
+            .expect("exhaust forced job");
 
         let changed = FileFingerprint {
             size: fingerprint.size + 1,
             ..fingerprint
         };
-        db.queue_thumbnail_job(&media, &changed, 100)
+        db.queue_thumbnail_job(&media, &changed, 100, false)
             .expect("changed source queues again");
         assert_eq!(
             db.claim_thumbnail_job()
@@ -904,7 +981,7 @@ mod tests {
         {
             let db = Database::open(path.clone()).expect("database");
             db.upsert_media(&media).expect("media");
-            db.queue_thumbnail_job(&media, &fingerprint, 0)
+            db.queue_thumbnail_job(&media, &fingerprint, 0, false)
                 .expect("queue");
             assert!(db.claim_thumbnail_job().expect("claim").is_some());
         }
@@ -916,6 +993,43 @@ mod tests {
         assert_eq!(resumed.media_id, media.id);
         assert_eq!(resumed.attempts, 2);
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn thumbnail_retry_deadlines_are_visible_to_the_scheduler() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-thumbnail-delay-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        let media = item("C:\\captures\\delayed.mp4", MediaKind::Raw);
+        db.upsert_media(&media).expect("media");
+        let fingerprint = FileFingerprint {
+            path_key: crate::media::normalized_path_key(std::path::Path::new(&media.path)),
+            size: media.file_size,
+            modified_ns: 2,
+        };
+        db.queue_thumbnail_job(&media, &fingerprint, 0, false)
+            .expect("queue");
+        let job = db.claim_thumbnail_job().expect("claim").expect("job");
+        db.fail_thumbnail_job(&media.id, job.attempts, "ffmpegFailed")
+            .expect("retry");
+        let delay = db
+            .next_thumbnail_job_delay()
+            .expect("delay query")
+            .expect("pending retry");
+        assert!(delay <= Duration::from_secs(retry_backoff_seconds(1) as u64));
+        db.delete_thumbnail_job(&media.id).expect("delete job");
+        assert!(db
+            .next_thumbnail_job_delay()
+            .expect("empty queue")
+            .is_none());
+        assert_eq!(retry_backoff_seconds(1), 2);
+        assert_eq!(retry_backoff_seconds(3), 8);
+        assert_eq!(retry_backoff_seconds(u32::MAX), 64);
+        drop(db);
         let _ = std::fs::remove_file(path);
     }
 
@@ -940,6 +1054,22 @@ mod tests {
         assert_eq!(database.list_media(None).expect("fresh index").len(), 0);
         drop(database);
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn transient_database_failures_never_trigger_quarantine() {
+        assert!(should_quarantine_database(
+            ErrorCode::DatabaseIntegrityFailed
+        ));
+        for code in [
+            ErrorCode::DatabaseUnavailable,
+            ErrorCode::DatabaseBusy,
+            ErrorCode::PermissionDenied,
+            ErrorCode::DiskFull,
+            ErrorCode::DatabaseMigrationFailed,
+        ] {
+            assert!(!should_quarantine_database(code));
+        }
     }
 
     #[test]

@@ -248,8 +248,6 @@ fn persist(
     database: &Database,
     result: &ScanFolderResult,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for item in &result.items {
-        database.upsert_media(item)?;
-    }
+    database.upsert_media_batch(&result.items)?;
     Ok(())
 }

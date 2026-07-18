@@ -23,6 +23,8 @@ Watcher events are not the durable source of truth. The frontend performs deboun
 
 Thumbnail work is persisted in `thumbnail_jobs`. Only one worker is active, duplicate media IDs are collapsed, failed work uses bounded attempts and backoff, and a new source fingerprint resets an exhausted job. A process interrupted while a job is marked `running` returns that job to `queued` during the next database open.
 
+Retry deadlines use an interruptible timed wake-up, so delayed work does not depend on another scan or restart. The Settings repair action explicitly resets the bounded attempt budget for permanently failed thumbnails. Missing-media jobs are removed instead of remaining stuck in `running`.
+
 Use the Settings repair action, or run a normal library refresh, to enqueue missing or corrupt thumbnails. Partial files use `.reelspace-part.jpg` names inside the thumbnail cache and are never treated as completed thumbnails.
 
 ## Diagnostics
@@ -33,7 +35,11 @@ Runner transcripts are under `logs\runners`. The runner reports its revision, no
 
 Rust panics are written as structured reports under the application `recovery` directory. An active-session marker is removed on graceful exit; if it remains after an interruption, the next launch records an unclean-shutdown recovery event and resumes persistent thumbnail work.
 
+Reelspace enforces a single desktop instance and focuses the existing window when launched again. Recovery reports are capped at 20 files. Asset-protocol access begins empty and is expanded only to configured source/output folders and Reelspace-managed media cache directories.
+
 If SQLite cannot be opened or fails its integrity check, Reelspace renames the database and its WAL/SHM sidecars with a timestamped `.corrupt-*` suffix before creating a clean rebuildable index. The quarantined database is never overwritten. A database created by a newer Reelspace schema is preserved and rejected instead of being reset.
+
+Only confirmed database corruption triggers quarantine. Locking, temporary I/O errors, permission failures, disk-full conditions, and migration failures leave the original database in place for retry or manual recovery. Changed scan records are committed in one atomic batch transaction.
 
 ## Large-Library Benchmark
 

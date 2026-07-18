@@ -2,6 +2,7 @@ use reelspace_lib::db::Database;
 use reelspace_lib::error::ErrorCode;
 use reelspace_lib::ffmpeg::Ffmpeg;
 use reelspace_lib::media::{scan_folder, FileFingerprint};
+use reelspace_lib::models::{MediaItem, MediaKind};
 use std::collections::HashMap;
 use std::fs::{self, File, FileTimes};
 use std::path::{Path, PathBuf};
@@ -92,4 +93,49 @@ fn tool_configuration_rejects_missing_executables_independently() {
     let missing = Path::new("Z:\\definitely-missing\\tool.exe").to_path_buf();
     let error = Ffmpeg::from_paths(missing.clone(), missing).expect_err("tools are absent");
     assert_eq!(error.code, ErrorCode::FfmpegUnavailable);
+}
+
+#[test]
+fn ten_thousand_item_index_survives_listing_and_reopen() {
+    const ITEM_COUNT: usize = 10_000;
+    let directory = fixture("large-index");
+    let database_path = directory.join("library.sqlite");
+    {
+        let database = Database::open(database_path.clone()).expect("database");
+        let items = (0..ITEM_COUNT)
+            .map(|index| MediaItem {
+                id: format!("{index:064x}"),
+                kind: MediaKind::Raw,
+                path: format!("C:\\captures\\game-{}\\video-{index}.mp4", index % 25),
+                source_path: None,
+                filename: format!("video-{index}.mp4"),
+                file_size: index as u64 + 1,
+                duration_seconds: 30.0,
+                width: Some(1920),
+                height: Some(1080),
+                codec: Some("h264".into()),
+                tags: vec![format!("game-{}", index % 25)],
+                notes: None,
+                thumbnail_path: None,
+                created_at: index as i64,
+                modified_at: index as i64,
+                trim_start_seconds: None,
+                trim_end_seconds: None,
+            })
+            .collect::<Vec<_>>();
+        database.upsert_media_batch(&items).expect("batch upsert");
+        let listed = database.list_media(Some(MediaKind::Raw)).expect("list");
+        assert_eq!(listed.len(), ITEM_COUNT);
+        assert_eq!(listed.first().expect("latest").modified_at, 9_999);
+    }
+    let reopened = Database::open(database_path).expect("reopen");
+    assert_eq!(
+        reopened
+            .list_media(Some(MediaKind::Raw))
+            .expect("reopened list")
+            .len(),
+        ITEM_COUNT
+    );
+    drop(reopened);
+    let _ = fs::remove_dir_all(directory);
 }

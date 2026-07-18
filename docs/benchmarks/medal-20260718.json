@@ -1,0 +1,46 @@
+{
+  "generatedAtUnixMs": 1784332363139,
+  "roots": [
+    "D:\\Medal\\Clips"
+  ],
+  "sourceFiles": 90,
+  "sourceBytes": 548746937917,
+  "scratchDirectory": "isolated-system-temp",
+  "cold": {
+    "elapsedMs": 12686,
+    "filesPerSecond": 7.094434810026801,
+    "filesVisited": 99,
+    "indexedFiles": 90,
+    "filesChanged": 90,
+    "cacheHits": 0,
+    "filesReprobed": 90,
+    "filesSkipped": 0,
+    "traversalErrors": 0,
+    "failuresByCode": {}
+  },
+  "warm": {
+    "elapsedMs": 15,
+    "filesPerSecond": 6000.0,
+    "filesVisited": 99,
+    "indexedFiles": 90,
+    "filesChanged": 0,
+    "cacheHits": 90,
+    "filesReprobed": 0,
+    "filesSkipped": 0,
+    "traversalErrors": 0,
+    "failuresByCode": {}
+  },
+  "warmRunMs": [
+    15,
+    15,
+    15,
+    15,
+    15
+  ],
+  "warmMedianMs": 15,
+  "warmP95Ms": 15,
+  "warmSpeedup": 845.7333333333333,
+  "databaseStorageBytes": 1528336,
+  "buildProfile": "release",
+  "logicalProcessors": 12
+}
