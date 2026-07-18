@@ -2,7 +2,7 @@
 
 Your gameplay recordings, organized locally.
 
-Reelspace is a Windows desktop library for browsing large capture folders, playing recordings, adding your own organization, and turning useful moments into clips—without uploading your media to a service.
+Reelspace is a Windows desktop library for browsing large capture folders, playing recordings, adding your own organization, and turning useful moments into clips—without requiring an online service.
 
 > [!WARNING]
 > Reelspace is early alpha software. Back up important recordings and exported library data. The installer is not code-signed, so Windows SmartScreen may show an unknown-publisher warning.
@@ -12,9 +12,12 @@ Reelspace is a Windows desktop library for browsing large capture folders, playi
 - Incremental scanning for large recording folders, including persistent probe caching and background thumbnail recovery
 - A responsive gallery with in-window playback and Windows Explorer integration
 - Custom tags, notes, collections, and collection membership
+- Automatic and manual game classification with aliases, renaming, merging, and collection storage defaults
 - Trim definitions and FFmpeg-powered clip generation that retain a reference to the source recording
+- Optional private YouTube archival with a persistent, resumable queue and explicit local/remote availability states
 - Storage usage warnings and a confirmed raw-recording cleanup flow
-- Metadata-only export and import for tags, notes, collections, memberships, and clip references
+- Metadata-only export and import for tags, notes, games, collections, storage preferences, archive references, and clip provenance
+- Signed in-app update checks backed by public GitHub Releases (the Windows installer itself remains unsigned)
 - Local diagnostics, unclean-shutdown detection, bounded job retries, and conservative database recovery
 
 ## Install on Windows
@@ -22,12 +25,12 @@ Reelspace is a Windows desktop library for browsing large capture folders, playi
 Reelspace currently supports Windows 10/11 x64.
 
 1. Open the [latest Reelspace release](https://github.com/canikou/Reelspace/releases/latest).
-2. Download `Reelspace_0.1.1-alpha.1_windows_x64_setup.exe` and its `.sha256` file.
+2. Download the `Reelspace_*_windows_x64_setup.exe` installer and its matching `.sha256` file.
 3. Optionally verify the download in PowerShell:
 
    ```powershell
-   (Get-FileHash .\Reelspace_0.1.1-alpha.1_windows_x64_setup.exe -Algorithm SHA256).Hash
-   Get-Content .\Reelspace_0.1.1-alpha.1_windows_x64_setup.exe.sha256
+   (Get-FileHash .\Reelspace_*_windows_x64_setup.exe -Algorithm SHA256).Hash
+   Get-Content .\Reelspace_*_windows_x64_setup.exe.sha256
    ```
 
    The two hashes should match.
@@ -38,20 +41,22 @@ Reelspace currently supports Windows 10/11 x64.
 
 Open **Settings**, add one or more folders containing recordings, and save. Reelspace indexes supported local media and fills thumbnails in the background. Configure a working folder and clip folder before exporting clips.
 
-Use **Export Library Data** in Settings to create a portable JSON archive of your organization metadata. The archive contains file references, not video files. After moving to another computer or drive, index the local recordings first and then import the archive; Reelspace restores data only for safely matched local files. See [portable library data](docs/library-data.md) for the exact matching and conflict rules.
+Use **Export Library Data** in Settings to create a portable JSON archive of your organization metadata. The archive contains file and verified remote references, not video files. After moving to another computer or drive, index any available local recordings and then import the archive. See [portable library data](docs/library-data.md) for the exact matching and conflict rules.
 
 ## Privacy and local data
 
-Reelspace is local-first. It has no account, cloud sync, advertising, analytics service, or hosted crash-report collector. Your database, thumbnails, previews, recovery reports, and rotated diagnostics remain in your Windows application-data directory. Routine logs avoid full media paths, but review any diagnostic file before sharing it publicly.
+Reelspace is local-first. It has no Reelspace account, cloud sync, advertising, analytics service, or hosted crash-report collector. Your database, thumbnails, previews, recovery reports, and rotated diagnostics remain in your Windows application-data directory. Routine logs avoid full media paths, but review any diagnostic file before sharing it publicly.
+
+Private YouTube archival is optional and off by default. When enabled, OAuth credentials are kept in Windows Credential Manager and selected recordings are uploaded as private videos. Update checks contact public GitHub Releases; automatic downloads remain off by default.
 
 Exported library-data archives may contain filenames, folder references, tags, notes, and collection names. Treat them as personal data even though they contain no video or audio.
 
 ## Known limits
 
 - Windows x64 only; the installer is currently unsigned.
-- Recordings must remain available on a local or Windows-accessible filesystem for playback, scanning, and clip creation.
-- There is no cloud backup, automatic updater, or online video archival.
-- Import carries organization metadata and file references, not media or application settings.
+- Local files must remain available for playback and clip creation; YouTube archive copies open in the browser and are not a general cloud-sync filesystem.
+- Import carries organization metadata and file/archive references, not media files, OAuth credentials, or general application settings.
+- In-app updates are cryptographically signed, but the installer has no paid Authenticode signature and may trigger SmartScreen.
 - This alpha may still contain rough edges. Keep backups and verify generated clips before deleting any source recording.
 
 ## Roadmap

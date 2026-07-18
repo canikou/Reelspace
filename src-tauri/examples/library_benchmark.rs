@@ -43,11 +43,20 @@ struct BenchmarkReport {
     logical_processors: usize,
 }
 
+struct ScratchCleanup(PathBuf);
+
+impl Drop for ScratchCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let roots = parse_roots()?;
     let (source_files, source_bytes) = inventory(&roots)?;
     let scratch = benchmark_scratch()?;
     fs::create_dir_all(scratch.join("thumbnails"))?;
+    let _scratch_cleanup = ScratchCleanup(scratch.clone());
 
     for root in &roots {
         let canonical = root.canonicalize()?;
