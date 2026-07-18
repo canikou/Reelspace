@@ -11,6 +11,13 @@ export interface MediaActions {
   notes: (item: MediaItem) => void;
   tags: (item: MediaItem) => void;
   addToCollection: (item: MediaItem) => void;
+  classify?: (item: MediaItem) => void;
+  archive?: (item: MediaItem) => void;
+  setKeepLocal?: (item: MediaItem, value: boolean) => void;
+  openRemote?: (item: MediaItem) => void;
+  removeLocal?: (item: MediaItem) => void;
+  removeRemote?: (item: MediaItem) => void;
+  removeFromCollection?: (item: MediaItem) => void;
 }
 
 export function MediaCard({
@@ -53,6 +60,7 @@ export function MediaCard({
       </button>
       <div className="card-body">
         <div className="tag-row">
+          {item.gameName ? <span className="game-tag"><AppIcon name="game" size={11} />{item.gameName}</span> : null}
           {item.tags.length ? item.tags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>) : <span>Untagged</span>}
           {item.tags.length > 2 ? <span className="tag-count">+{item.tags.length - 2}</span> : null}
         </div>
@@ -68,7 +76,14 @@ export function MediaCard({
           <div>
             <button onClick={() => actions.tags(item)}><AppIcon name="tags" size={16} /> Moment tags</button>
             <button onClick={() => actions.notes(item)}><AppIcon name="notes" size={16} /> Notes</button>
+            {actions.classify ? <button onClick={() => actions.classify?.(item)}><AppIcon name="game" size={16} /> Classify game</button> : null}
             <button onClick={() => actions.addToCollection(item)}><AppIcon name="collection" size={16} /> Add to collection</button>
+            {actions.removeFromCollection ? <button className="destructive-menu-item" onClick={() => actions.removeFromCollection?.(item)}><AppIcon name="cancel" size={16} /> Remove from collection</button> : null}
+            {actions.archive && (availability === "localOnly" || availability === "uploadFailed") ? <button onClick={() => actions.archive?.(item)}><AppIcon name="archive" size={16} /> Archive privately</button> : null}
+            {actions.setKeepLocal ? <button onClick={() => actions.setKeepLocal?.(item, !item.keepLocal)}><AppIcon name="protected" size={16} /> {item.keepLocal ? "Disable Keep Local" : "Keep Local"}</button> : null}
+            {actions.openRemote && item.primaryRemoteUrl ? <button onClick={() => actions.openRemote?.(item)}><AppIcon name="play" size={16} /> Open remote copy</button> : null}
+            {actions.removeLocal && availability === "archivedVerified" && !item.keepLocal ? <button className="destructive-menu-item" onClick={() => actions.removeLocal?.(item)}><AppIcon name="cleanup" size={16} /> Remove local copy</button> : null}
+            {actions.removeRemote && item.primaryRemoteUrl ? <button className="destructive-menu-item" onClick={() => actions.removeRemote?.(item)}><AppIcon name="error" size={16} /> Delete remote copy</button> : null}
           </div>
         </details>
       </div>

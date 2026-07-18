@@ -1,20 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { AppIcon, FrameStackMark } from "../components/icons";
-import { normalizeAppError } from "../lib/api";
-import { pickFolder, pickLibraryDataExport, pickLibraryDataImport } from "../lib/dialog";
+import { api, normalizeAppError } from "../lib/api";
+import { pickDiagnosticsExport, pickFolder, pickLibraryDataExport, pickLibraryDataImport } from "../lib/dialog";
 import { formatBytes } from "../lib/format";
-import type { AppSettings, AppSnapshot, LibraryDataExportSummary, LibraryDataImportSummary } from "../lib/types";
+import type { AppSettings, AppSnapshot, ArchiveAccount, LibraryDataExportSummary, LibraryDataImportSummary, RecorderApp } from "../lib/types";
 
 export function SettingsPage({
   snapshot,
   onSave,
   onExportData,
-  onImportData
+  onImportData,
+  recorders = [],
+  archiveAccount = null,
+  onConnectYouTube = async () => undefined,
+  onDisconnectYouTube = async () => undefined,
 }: {
   snapshot: AppSnapshot;
   onSave: (settings: AppSettings) => Promise<void>;
   onExportData: (path: string) => Promise<LibraryDataExportSummary>;
   onImportData: (path: string) => Promise<LibraryDataImportSummary>;
+  recorders?: RecorderApp[];
+  archiveAccount?: ArchiveAccount | null;
+  onConnectYouTube?: (clientId: string, clientSecret: string) => Promise<unknown>;
+  onDisconnectYouTube?: () => Promise<void>;
 }) {
   const [sourceFolders, setSourceFolders] = useState(snapshot.settings.sourceFolders.join("\n"));
   const [workingFolder, setWorkingFolder] = useState(snapshot.settings.workingFolder ?? "");
@@ -27,6 +35,15 @@ export function SettingsPage({
   const [automaticallyCheckUpdates, setAutomaticallyCheckUpdates] = useState(snapshot.settings.automaticallyCheckUpdates ?? true);
   const [automaticallyDownloadUpdates, setAutomaticallyDownloadUpdates] = useState(snapshot.settings.automaticallyDownloadUpdates ?? false);
   const [includePrereleaseUpdates, setIncludePrereleaseUpdates] = useState(snapshot.settings.includePrereleaseUpdates ?? true);
+  const [preferredRecordingApp, setPreferredRecordingApp] = useState(snapshot.settings.preferredRecordingApp ?? "");
+  const [automaticallyArchiveRecordings, setAutomaticallyArchiveRecordings] = useState(snapshot.settings.automaticallyArchiveRecordings ?? false);
+  const [automaticallyArchiveClips, setAutomaticallyArchiveClips] = useState(snapshot.settings.automaticallyArchiveClips ?? false);
+  const [keepLocalClips, setKeepLocalClips] = useState(snapshot.settings.keepLocalClips ?? true);
+  const [pauseUploadsWhileRecording, setPauseUploadsWhileRecording] = useState(snapshot.settings.pauseUploadsWhileRecording ?? true);
+  const [youtubeClientId, setYouTubeClientId] = useState("");
+  const [youtubeClientSecret, setYouTubeClientSecret] = useState("");
+  const [youtubeBusy, setYouTubeBusy] = useState(false);
+  const [maintenanceStatus, setMaintenanceStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dataBusy, setDataBusy] = useState<"export" | "import" | null>(null);
@@ -43,6 +60,11 @@ export function SettingsPage({
     setAutomaticallyCheckUpdates(snapshot.settings.automaticallyCheckUpdates ?? true);
     setAutomaticallyDownloadUpdates(snapshot.settings.automaticallyDownloadUpdates ?? false);
     setIncludePrereleaseUpdates(snapshot.settings.includePrereleaseUpdates ?? true);
+    setPreferredRecordingApp(snapshot.settings.preferredRecordingApp ?? "");
+    setAutomaticallyArchiveRecordings(snapshot.settings.automaticallyArchiveRecordings ?? false);
+    setAutomaticallyArchiveClips(snapshot.settings.automaticallyArchiveClips ?? false);
+    setKeepLocalClips(snapshot.settings.keepLocalClips ?? true);
+    setPauseUploadsWhileRecording(snapshot.settings.pauseUploadsWhileRecording ?? true);
   }, [snapshot]);
 
   async function save() {
@@ -60,7 +82,12 @@ export function SettingsPage({
         theme,
         automaticallyCheckUpdates,
         automaticallyDownloadUpdates,
-        includePrereleaseUpdates
+        includePrereleaseUpdates,
+        preferredRecordingApp: preferredRecordingApp || null,
+        automaticallyArchiveRecordings,
+        automaticallyArchiveClips,
+        keepLocalClips,
+        pauseUploadsWhileRecording
       });
     } catch (reason) {
       setError(String(reason));
@@ -203,6 +230,28 @@ export function SettingsPage({
         <p className="muted">Updates are verified with Reelspace's Tauri signing key before installation. Active FFmpeg work is never interrupted.</p>
       </section>
       <section className="settings-panel">
+        <h2>Recorder</h2>
+        <label>Preferred recording application<select value={preferredRecordingApp} onChange={(event) => setPreferredRecordingApp(event.target.value)}><option value="">Use first detected app</option>{recorders.map((recorder) => <option key={recorder.id} value={recorder.executablePath}>{recorder.name}</option>)}</select></label>
+        <label className="toggle-row"><input type="checkbox" checked={pauseUploadsWhileRecording} onChange={(event) => setPauseUploadsWhileRecording(event.target.checked)} /><span>Pause archive uploads while recording</span></label>
+        <p className="muted">Recorder launch is a separate local shortcut and never changes archive state.</p>
+      </section>
+      <section className="settings-panel">
+        <h2>Archive defaults</h2>
+        <label className="toggle-row"><input type="checkbox" checked={automaticallyArchiveRecordings} onChange={(event) => setAutomaticallyArchiveRecordings(event.target.checked)} /><span>Automatically queue new recordings</span></label>
+        <label className="toggle-row"><input type="checkbox" checked={automaticallyArchiveClips} onChange={(event) => setAutomaticallyArchiveClips(event.target.checked)} /><span>Automatically queue generated clips</span></label>
+        <label className="toggle-row"><input type="checkbox" checked={keepLocalClips} onChange={(event) => setKeepLocalClips(event.target.checked)} /><span>Keep generated clips local by default</span></label>
+        <p className="muted">Automatic local cleanup remains disabled. Only verified archives can become cleanup candidates.</p>
+      </section>
+      <section className="settings-panel archive-account-panel">
+        <h2>YouTube archive</h2>
+        {archiveAccount ? <><div className="account-state"><AppIcon name="archive" size={18} /><div><strong>{archiveAccount.displayName}</strong><span>Connected · private uploads only</span></div></div><button className="secondary-button" disabled={youtubeBusy} onClick={async () => { setYouTubeBusy(true); setError(null); try { await onDisconnectYouTube(); } catch (reason) { setError(normalizeAppError(reason).message); } finally { setYouTubeBusy(false); } }}>Disconnect YouTube</button></> : <>
+          <p className="muted">Create a Google Cloud OAuth client of type <strong>Desktop app</strong>, enable YouTube Data API v3, and add yourself as a test user. Credentials and refresh tokens are stored in Windows Credential Manager, never SQLite.</p>
+          <label>Desktop OAuth client ID<input autoComplete="off" value={youtubeClientId} onChange={(event) => setYouTubeClientId(event.target.value)} placeholder="123…apps.googleusercontent.com" /></label>
+          <label>Desktop OAuth client secret<input type="password" autoComplete="off" value={youtubeClientSecret} onChange={(event) => setYouTubeClientSecret(event.target.value)} /></label>
+          <button className="primary-button" disabled={youtubeBusy || !youtubeClientId || !youtubeClientSecret} onClick={async () => { setYouTubeBusy(true); setError(null); try { await onConnectYouTube(youtubeClientId.trim(), youtubeClientSecret); setYouTubeClientSecret(""); } catch (reason) { setError(normalizeAppError(reason).message); } finally { setYouTubeBusy(false); } }}><AppIcon name="archive" size={17} />{youtubeBusy ? "Waiting for Google…" : "Connect YouTube"}</button>
+        </>}
+      </section>
+      <section className="settings-panel">
         <h2>Library data</h2>
         <p className="muted">Move tags, notes, collections, and clip references without copying video, thumbnails, or previews.</p>
         <button className="secondary-button" onClick={exportData} disabled={dataBusy !== null} title="Export portable library data">
@@ -219,6 +268,13 @@ export function SettingsPage({
         <h2>About</h2>
         <div className="about-brand"><span><FrameStackMark size={44} /></span><div><strong>Reelspace {snapshot.version}</strong><small>Frame Stack alpha</small></div></div>
         <p className="muted">Local-first Windows alpha. No analytics or automatic crash uploads.</p>
+      </section>
+      <section className="settings-panel">
+        <h2>Diagnostics and repair</h2>
+        <button className="secondary-button" onClick={() => api.openDiagnosticsFolder().catch((reason) => setError(normalizeAppError(reason).message))}><AppIcon name="search" size={17} /> Open log folder</button>
+        <button className="secondary-button" onClick={async () => { const path = await pickDiagnosticsExport(); if (!path) return; try { await api.exportDiagnostics(path); setMaintenanceStatus("Sanitized diagnostics exported"); } catch (reason) { setError(normalizeAppError(reason).message); } }}><AppIcon name="download" size={17} /> Export diagnostic report</button>
+        <button className="secondary-button" onClick={async () => { setMaintenanceStatus("Repairing library…"); try { await api.scanSources(); await api.repairThumbnails(); const summary = await api.repairLibrary(); setMaintenanceStatus(`Repair complete: ${summary.missingLocalFiles} missing local, ${summary.preservedRemoteOnlyItems} preserved remote-only.`); } catch (reason) { setError(normalizeAppError(reason).message); setMaintenanceStatus(null); } }}><AppIcon name="repair" size={17} /> Refresh and repair library</button>
+        {maintenanceStatus ? <p className="data-status">{maintenanceStatus}</p> : null}
       </section>
       <div className="settings-actions">
         {error ? <div className="inline-error">{error}</div> : null}

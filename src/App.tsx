@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppIcon } from "./components/icons";
 import { CollectionPickerDialog } from "./components/CollectionPickerDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { GamePickerDialog } from "./components/GamePickerDialog";
 import { PlayerModal } from "./components/PlayerModal";
 import { SetupPrompt } from "./components/SetupPrompt";
 import { Sidebar, type PageKey } from "./components/Sidebar";
@@ -11,13 +12,15 @@ import { UpdatePrompt } from "./components/UpdatePrompt";
 import { api, normalizeAppError } from "./lib/api";
 import { pickFolder } from "./lib/dialog";
 import { formatBytes } from "./lib/format";
-import type { AppSnapshot, Collection, MediaItem } from "./lib/types";
+import type { AppSnapshot, ArchiveAccount, Collection, Game, MediaItem, RecorderApp, UploadJob } from "./lib/types";
 import { checkForUpdate, dismissUpdate, downloadUpdate, installUpdate, type UpdateViewState } from "./lib/updater";
 import { ClipsPage } from "./pages/ClipsPage";
 import { CollectionsPage } from "./pages/CollectionsPage";
 import { GalleryPage } from "./pages/GalleryPage";
 import { HomePage } from "./pages/HomePage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { GamesPage } from "./pages/GamesPage";
+import { ArchivePage } from "./pages/ArchivePage";
 
 type EditorState = { kind: "tags" | "notes"; item: MediaItem } | null;
 
@@ -27,15 +30,22 @@ export function App() {
   const [rawItems, setRawItems] = useState<MediaItem[]>([]);
   const [clipItems, setClipItems] = useState<MediaItem[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
+  const [games, setGames] = useState<Game[]>([]);
+  const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
+  const [recorders, setRecorders] = useState<RecorderApp[]>([]);
+  const [archiveAccount, setArchiveAccount] = useState<ArchiveAccount | null>(null);
   const [playing, setPlaying] = useState<MediaItem | null>(null);
   const [trimming, setTrimming] = useState<MediaItem | null>(null);
   const [editing, setEditing] = useState<EditorState>(null);
   const [collectionTarget, setCollectionTarget] = useState<MediaItem | null>(null);
+  const [gameTarget, setGameTarget] = useState<MediaItem | null>(null);
   const [creatingCollection, setCreatingCollection] = useState(false);
   const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null);
   const [collectionItems, setCollectionItems] = useState<MediaItem[]>([]);
   const [highlightedClipId, setHighlightedClipId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<MediaItem | null>(null);
+  const [pendingLocalRemoval, setPendingLocalRemoval] = useState<MediaItem | null>(null);
+  const [pendingRemoteRemoval, setPendingRemoteRemoval] = useState<MediaItem | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -59,14 +69,40 @@ export function App() {
       api.getAppState(),
       api.listMedia("raw"),
       api.listMedia("clip"),
-      api.listCollections()
+      api.listCollections(),
+      api.listArchiveStatuses(),
+      api.listGameAssignments(),
+      api.listGames(),
+      api.listUploadJobs(),
+      api.detectRecordingApps(),
+      api.getArchiveAccount()
     ] as const);
     if (generation !== refreshGeneration.current) return;
     const failures: unknown[] = [];
     if (results[0].status === "fulfilled") setSnapshot(results[0].value); else failures.push(results[0].reason);
-    if (results[1].status === "fulfilled") setRawItems(results[1].value); else failures.push(results[1].reason);
-    if (results[2].status === "fulfilled") setClipItems(results[2].value); else failures.push(results[2].reason);
+    const statuses = results[4].status === "fulfilled" ? new Map(results[4].value.map((status) => [status.mediaId, status])) : new Map();
+    const assignments = results[5].status === "fulfilled" ? new Map(results[5].value.map((assignment) => [assignment.mediaId, assignment])) : new Map();
+    const enrich = (items: MediaItem[]) => items.map((item) => {
+      const status = statuses.get(item.id);
+      const game = assignments.get(item.id);
+      return { ...item,
+        availability: status?.state ?? "localOnly",
+        keepLocal: status?.keepLocal ?? item.kind === "clip",
+        remoteCopyCount: status?.remoteCopyCount ?? 0,
+        primaryRemoteUrl: status?.primaryRemoteUrl ?? null,
+        gameId: game?.gameId ?? null,
+        gameName: game?.gameName ?? null
+      };
+    });
+    if (results[1].status === "fulfilled") setRawItems(enrich(results[1].value)); else failures.push(results[1].reason);
+    if (results[2].status === "fulfilled") setClipItems(enrich(results[2].value)); else failures.push(results[2].reason);
     if (results[3].status === "fulfilled") setCollections(results[3].value); else failures.push(results[3].reason);
+    if (results[4].status === "rejected") failures.push(results[4].reason);
+    if (results[5].status === "rejected") failures.push(results[5].reason);
+    if (results[6].status === "fulfilled") setGames(results[6].value); else failures.push(results[6].reason);
+    if (results[7].status === "fulfilled") setUploadJobs(results[7].value); else failures.push(results[7].reason);
+    if (results[8].status === "fulfilled") setRecorders(results[8].value); else failures.push(results[8].reason);
+    if (results[9].status === "fulfilled") setArchiveAccount(results[9].value); else failures.push(results[9].reason);
     if (failures.length) throw normalizeAppError(failures[0]);
   }, []);
 
@@ -107,9 +143,15 @@ export function App() {
       reveal: (item: MediaItem) => api.revealInExplorer(item.id).catch(showError),
       notes: (item: MediaItem) => setEditing({ kind: "notes", item }),
       tags: (item: MediaItem) => setEditing({ kind: "tags", item }),
-      addToCollection: setCollectionTarget
+      addToCollection: setCollectionTarget,
+      classify: setGameTarget,
+      archive: (item: MediaItem) => api.queueArchive([item.id]).then(async () => { await refresh(); setNotice("Queued for private archive"); }).catch(showError),
+      setKeepLocal: (item: MediaItem, value: boolean) => api.setKeepLocal(item.id, value).then(async () => { await refresh(); setNotice(value ? "Keep Local enabled" : "Keep Local disabled"); }).catch(showError),
+      openRemote: (item: MediaItem) => api.openRemoteCopy(item.id).catch(showError),
+      removeLocal: setPendingLocalRemoval,
+      removeRemote: setPendingRemoteRemoval
     }),
-    [showError]
+    [refresh, showError]
   );
 
   const rootsKey = snapshot?.settings.sourceFolders.join("\0") ?? "";
@@ -156,6 +198,12 @@ export function App() {
     const timeout = window.setTimeout(() => setNotice(null), 3000);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+
+  useEffect(() => {
+    if (page !== "archive") return;
+    const interval = window.setInterval(() => refresh().catch(showError), 5_000);
+    return () => window.clearInterval(interval);
+  }, [page, refresh, showError]);
 
   useEffect(() => {
     if (!highlightedClipId) return;
@@ -205,6 +253,7 @@ export function App() {
           </div>
           <div className="topbar-actions">
             {busy ? <span className="activity-pill"><AppIcon name="refresh" size={14} className="spin" /> Scanning</span> : null}
+            {recorders[0] ? <button className="recorder-button" onClick={() => api.launchRecordingApp(recorders[0].id).catch(showError)} aria-label={`Open ${recorders[0].name}`} title={`Open ${recorders[0].name}`}><AppIcon name="recorder" size={17} /><span>{recorders[0].name}</span></button> : null}
             <button className="icon-button" onClick={() => runUpdateCheck(true)} disabled={updateState.phase === "checking" || updateState.phase === "downloading"} aria-label="Check for updates" title="Check for updates">
               <AppIcon name="update" size={18} className={updateState.phase === "checking" ? "spin" : undefined} />
             </button>
@@ -217,7 +266,7 @@ export function App() {
         {notice ? <div className="toast"><AppIcon name="success" size={17} /> {notice}</div> : null}
         <UpdatePrompt
           state={updateState}
-          activeWork={busy || trimming !== null}
+          activeWork={busy || trimming !== null || Boolean(snapshot?.activeMediaWork)}
           onDownload={async () => {
             try { setUpdateState(await downloadUpdate(setUpdateState)); }
             catch (reason) { setUpdateState((current) => ({ ...current, phase: "error", error: reason instanceof Error ? reason.message : "Update download failed" })); }
@@ -233,6 +282,7 @@ export function App() {
         {page === "home" && snapshot ? <HomePage snapshot={snapshot} rawItems={rawItems} clipItems={clipItems} actions={actions} onCleanup={setPendingDelete} /> : null}
         {page === "gallery" ? <GalleryPage items={rawItems} actions={actions} /> : null}
         {page === "clips" ? <ClipsPage items={clipItems} actions={actions} highlightedId={highlightedClipId} /> : null}
+        {page === "games" ? <GamesPage games={games} onCreate={async (name) => { setGames(await api.createGame(name)); setNotice("Game created"); }} onRename={async (game, name) => { setGames(await api.renameGame(game.id, name)); await refresh(); setNotice("Game renamed and alias preserved"); }} onMerge={async (source, target) => { setGames(await api.mergeGames(source.id, target.id)); await refresh(); setNotice("Game classifications merged"); }} /> : null}
         {page === "collections" ? (
           <CollectionsPage
             collections={collections}
@@ -242,11 +292,24 @@ export function App() {
             onCreate={() => setCreatingCollection(true)}
             onSelect={openCollection}
             onBack={() => { collectionRequestGeneration.current += 1; setSelectedCollection(null); setCollectionItems([]); }}
+            onRemove={async (collection, item) => { await api.removeFromCollection(collection.id, item.id); await openCollection(collection); await refresh(); setNotice("Removed from collection"); }}
+            onStorageDefault={async (collection, policy) => {
+              const nextCollections = await api.setCollectionStorageDefault(collection.id, policy);
+              setCollections(nextCollections);
+              setSelectedCollection(nextCollections.find((item) => item.id === collection.id) ?? null);
+              await refresh();
+              setNotice(policy === "keepLocal" ? "Collection keeps new items local" : policy === "archive" ? "Collection archives new items" : "Collection uses app defaults");
+            }}
           />
         ) : null}
+        {page === "archive" ? <ArchivePage jobs={uploadJobs} onControl={async (action, jobId) => { setUploadJobs(await api.controlUploadQueue(action, jobId)); await refresh(); }} /> : null}
         {page === "settings" && snapshot ? (
           <SettingsPage
             snapshot={snapshot}
+            recorders={recorders}
+            archiveAccount={archiveAccount}
+            onConnectYouTube={async (clientId, clientSecret) => { setArchiveAccount(await api.connectYouTube(clientId, clientSecret)); await refresh(); setNotice("YouTube archive connected"); }}
+            onDisconnectYouTube={async () => { await api.disconnectYouTube(); setArchiveAccount(null); await refresh(); setNotice("YouTube archive disconnected"); }}
             onSave={async (settings) => {
               const next = await api.saveSettings(settings);
               setSnapshot(next);
@@ -306,6 +369,28 @@ export function App() {
           }}
         />
       ) : null}
+      {gameTarget ? (
+        <GamePickerDialog
+          item={gameTarget}
+          games={games}
+          onClose={() => setGameTarget(null)}
+          onCreate={async (name) => {
+            const nextGames = await api.createGame(name);
+            setGames(nextGames);
+            const created = nextGames.find(
+              (game) => game.name.toLocaleLowerCase() === name.trim().toLocaleLowerCase(),
+            );
+            if (!created) throw new Error("The new game could not be found after creation.");
+            return created;
+          }}
+          onPick={async (game) => {
+            await api.assignGame(gameTarget.id, game.id);
+            setGameTarget(null);
+            await refresh();
+            setNotice(`Classified as ${game.name}`);
+          }}
+        />
+      ) : null}
       {creatingCollection ? (
         <TextEditorDialog
           title="New collection"
@@ -333,6 +418,24 @@ export function App() {
           }}
         />
       ) : null}
+      {pendingLocalRemoval ? (
+        <ConfirmDialog
+          title="Remove local copy?"
+          description="The verified remote archive will remain available. The local file moves to the Windows Recycle Bin."
+          detail={pendingLocalRemoval.path}
+          onClose={() => setPendingLocalRemoval(null)}
+          onConfirm={async () => { await api.removeLocalCopy(pendingLocalRemoval.id); setPendingLocalRemoval(null); await refresh(); setNotice("Local copy moved to the Recycle Bin"); }}
+        />
+      ) : null}
+      {pendingRemoteRemoval ? (
+        <ConfirmDialog
+          title="Delete remote archive?"
+          description="This permanently deletes the private YouTube copy. The local file is not changed."
+          detail={pendingRemoteRemoval.filename}
+          onClose={() => setPendingRemoteRemoval(null)}
+          onConfirm={async () => { await api.deleteYouTubeRemote(pendingRemoteRemoval.id); setPendingRemoteRemoval(null); await refresh(); setNotice("Remote copy deleted"); }}
+        />
+      ) : null}
       {snapshot && !snapshot.settings.sourceFolders.length && !setupDismissed ? (
         <SetupPrompt busy={busy} onChoose={chooseInitialSourceFolder} onDismiss={() => setSetupDismissed(true)} />
       ) : null}
@@ -341,5 +444,5 @@ export function App() {
 }
 
 function titleFor(page: PageKey): string {
-  return { home: "Home", gallery: "Recordings", clips: "Clips", collections: "Collections", settings: "Settings" }[page];
+  return { home: "Home", gallery: "Recordings", clips: "Clips", games: "Games", collections: "Collections", archive: "Archive", settings: "Settings" }[page];
 }

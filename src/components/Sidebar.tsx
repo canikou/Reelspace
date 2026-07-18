@@ -1,12 +1,14 @@
 import { AppIcon, FrameStackMark, type IconName } from "./icons";
 
-export type PageKey = "home" | "gallery" | "clips" | "collections" | "settings";
+export type PageKey = "home" | "gallery" | "clips" | "games" | "collections" | "archive" | "settings";
 
 const items: Array<{ key: PageKey; label: string; icon: IconName }> = [
   { key: "home", label: "Home", icon: "home" },
   { key: "gallery", label: "Recordings", icon: "recording" },
   { key: "clips", label: "Clips", icon: "clip" },
+  { key: "games", label: "Games", icon: "game" },
   { key: "collections", label: "Collections", icon: "collection" },
+  { key: "archive", label: "Archive", icon: "archive" },
   { key: "settings", label: "Settings", icon: "settings" }
 ];
 
