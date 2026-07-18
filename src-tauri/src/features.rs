@@ -5,6 +5,7 @@ use crate::models::{
     UploadJob,
 };
 use crate::state::AppState;
+use crate::windows_integration::open_external_url;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -735,17 +736,7 @@ pub fn open_remote_copy(state: State<'_, AppState>, media_id: String) -> AppResu
     let url = status
         .primary_remote_url
         .ok_or_else(|| user_error("no remote browser link is available"))?;
-    std::process::Command::new("explorer.exe")
-        .arg(&url)
-        .spawn()
-        .map_err(|error| {
-            app_error(
-                ErrorCode::WindowsIntegrationFailed,
-                "The remote copy could not be opened",
-            )
-            .with_detail(error.to_string())
-        })?;
-    Ok(())
+    open_external_url(&url, "The remote copy could not be opened")
 }
 
 #[tauri::command]

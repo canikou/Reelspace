@@ -2,6 +2,7 @@ use crate::db::Database;
 use crate::error::{app_error, user_error, AppResult, ErrorCode};
 use crate::models::ArchiveAccount;
 use crate::state::AppState;
+use crate::windows_integration::open_external_url;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use keyring::Entry;
@@ -318,16 +319,10 @@ fn connect_youtube_inner(state: &AppState, client_id: String) -> AppResult<Archi
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", &expected_state);
-    std::process::Command::new("explorer.exe")
-        .arg(authorize.as_str())
-        .spawn()
-        .map_err(|error| {
-            app_error(
-                ErrorCode::WindowsIntegrationFailed,
-                "The Google authorization page could not be opened",
-            )
-            .with_detail(error.to_string())
-        })?;
+    open_external_url(
+        authorize.as_str(),
+        "The Google authorization page could not be opened",
+    )?;
     let (code, returned_state) = receive_oauth_callback(listener)?;
     if returned_state != expected_state {
         return Err(user_error(

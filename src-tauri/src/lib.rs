@@ -13,6 +13,7 @@ mod state;
 mod storage;
 mod telemetry;
 mod watcher;
+mod windows_integration;
 mod youtube;
 
 use commands::*;
