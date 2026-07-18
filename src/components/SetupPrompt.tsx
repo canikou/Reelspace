@@ -1,4 +1,4 @@
-import { FolderPlus, X } from "lucide-react";
+import { AppIcon, FrameStackMark } from "./icons";
 
 export function SetupPrompt({
   busy,
@@ -17,11 +17,12 @@ export function SetupPrompt({
             <h2 id="setup-title">Choose a capture folder</h2>
             <p>Reelspace needs one source folder before it can scan for raw videos.</p>
           </div>
-          <button title="Dismiss" aria-label="Dismiss" onClick={onDismiss}><X size={18} /></button>
+          <button title="Dismiss" aria-label="Dismiss" onClick={onDismiss}><AppIcon name="close" size={18} /></button>
         </header>
         <div className="setup-body">
+          <div className="setup-mark" aria-hidden="true"><FrameStackMark size={38} /></div>
           <button className="primary-button" onClick={onChoose} disabled={busy} title="Choose source folder">
-            <FolderPlus size={18} />
+            <AppIcon name="add" size={18} />
             {busy ? "Opening..." : "Choose Folder"}
           </button>
         </div>

@@ -1,24 +1,23 @@
-import { Clapperboard, FolderOpen, Home, Library, Settings, Tags, type LucideIcon } from "lucide-react";
+import { AppIcon, FrameStackMark, type IconName } from "./icons";
 
 export type PageKey = "home" | "gallery" | "clips" | "collections" | "settings";
 
-const items: Array<{ key: PageKey; label: string; icon: LucideIcon }> = [
-  { key: "home", label: "Home", icon: Home },
-  { key: "gallery", label: "Gallery", icon: FolderOpen },
-  { key: "clips", label: "Clips", icon: Clapperboard },
-  { key: "collections", label: "Collections", icon: Library },
-  { key: "settings", label: "Settings", icon: Settings }
+const items: Array<{ key: PageKey; label: string; icon: IconName }> = [
+  { key: "home", label: "Home", icon: "home" },
+  { key: "gallery", label: "Recordings", icon: "recording" },
+  { key: "clips", label: "Clips", icon: "clip" },
+  { key: "collections", label: "Collections", icon: "collection" },
+  { key: "settings", label: "Settings", icon: "settings" }
 ];
 
 export function Sidebar({ page, onPageChange }: { page: PageKey; onPageChange: (page: PageKey) => void }) {
   return (
     <aside className="sidebar">
       <div className="brand" title="Reelspace">
-        <Tags size={22} />
+        <FrameStackMark size={28} />
       </div>
       <nav className="nav-list" aria-label="Main navigation">
         {items.map((item) => {
-          const Icon = item.icon;
           return (
             <button
               key={item.key}
@@ -28,7 +27,8 @@ export function Sidebar({ page, onPageChange }: { page: PageKey; onPageChange: (
               aria-label={item.label}
               aria-current={page === item.key ? "page" : undefined}
             >
-              <Icon size={22} />
+              <AppIcon name={item.icon} size={21} />
+              <span>{item.label}</span>
             </button>
           );
         })}

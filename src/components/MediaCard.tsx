@@ -1,8 +1,8 @@
-import { Eye, FolderSearch, MoreVertical, NotebookPen, Scissors, Tags, Library } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { mediaSrc } from "../lib/api";
 import { formatBytes, formatDuration, formatShortDate } from "../lib/format";
 import type { MediaItem } from "../lib/types";
+import { AppIcon, AvailabilityIcon, type AvailabilityState } from "./icons";
 
 export interface MediaActions {
   view: (item: MediaItem) => void;
@@ -26,6 +26,7 @@ export function MediaCard({
 }) {
   const cardRef = useRef<HTMLElement | null>(null);
   const thumbnailSrc = mediaSrc(item.thumbnailPath);
+  const availability = (item.availability ?? "localOnly") as AvailabilityState;
   const detail = [
     item.width && item.height ? `${item.width}×${item.height}` : null,
     item.codec?.toUpperCase(),
@@ -43,9 +44,11 @@ export function MediaCard({
         {thumbnailSrc ? (
           <img src={thumbnailSrc} alt="" loading="lazy" decoding="async" />
         ) : (
-          <div className="empty-preview"><Eye size={22} /><span>No preview</span></div>
+          <div className="empty-preview"><AppIcon name={item.kind === "clip" ? "clip" : "recording"} size={24} /><span>No preview</span></div>
         )}
         <span className={`kind-pill ${item.kind}`}>{item.kind}</span>
+        <AvailabilityIcon state={availability} className="card-availability" />
+        {item.keepLocal ? <span className="keep-local-badge" title="Protected from automatic cleanup" aria-label="Keep Local enabled"><AppIcon name="protected" size={13} /></span> : null}
         <span className="duration-pill">{formatDuration(item.durationSeconds)}</span>
       </button>
       <div className="card-body">
@@ -57,15 +60,15 @@ export function MediaCard({
         <p title={detail}>{detail}</p>
       </div>
       <div className="card-actions">
-        <button title="Play" aria-label="Play" onClick={() => actions.view(item)}><Eye size={17} /></button>
-        {item.kind === "raw" ? <button title="Trim" aria-label="Trim" onClick={() => actions.trim(item)}><Scissors size={17} /></button> : null}
-        <button title="Show in Explorer" aria-label="Show in Explorer" onClick={() => actions.reveal(item)}><FolderSearch size={17} /></button>
+        <button title="Play" aria-label="Play" onClick={() => actions.view(item)}><AppIcon name="play" size={17} /></button>
+        {item.kind === "raw" ? <button title="Create clip" aria-label="Create clip" onClick={() => actions.trim(item)}><AppIcon name="clip" size={17} /></button> : null}
+        <button title="Show in Explorer" aria-label="Show in Explorer" onClick={() => actions.reveal(item)}><AppIcon name="search" size={17} /></button>
         <details className="card-menu">
-          <summary title="More actions" aria-label="More actions"><MoreVertical size={17} /></summary>
+          <summary title="More actions" aria-label="More actions"><AppIcon name="more" size={17} /></summary>
           <div>
-            <button onClick={() => actions.tags(item)}><Tags size={16} /> Tags</button>
-            <button onClick={() => actions.notes(item)}><NotebookPen size={16} /> Notes</button>
-            <button onClick={() => actions.addToCollection(item)}><Library size={16} /> Collection</button>
+            <button onClick={() => actions.tags(item)}><AppIcon name="tags" size={16} /> Moment tags</button>
+            <button onClick={() => actions.notes(item)}><AppIcon name="notes" size={16} /> Notes</button>
+            <button onClick={() => actions.addToCollection(item)}><AppIcon name="collection" size={16} /> Add to collection</button>
           </div>
         </details>
       </div>

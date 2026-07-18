@@ -1,6 +1,6 @@
-import { Save } from "lucide-react";
 import { useRef, useState } from "react";
 import { Dialog } from "./Dialog";
+import { AppIcon } from "./icons";
 
 export function TextEditorDialog({
   title,
@@ -64,7 +64,7 @@ export function TextEditorDialog({
       <footer className="dialog-actions">
         <button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
         <button className="primary-button" onClick={save} disabled={busy}>
-          <Save size={16} /> {busy ? "Saving" : "Save"}
+          <AppIcon name="save" size={16} /> {busy ? "Saving" : "Save"}
         </button>
       </footer>
     </Dialog>

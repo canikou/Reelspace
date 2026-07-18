@@ -1,6 +1,6 @@
-import { AlertTriangle, Trash2 } from "lucide-react";
 import { useRef, useState } from "react";
 import { Dialog } from "./Dialog";
+import { AppIcon } from "./icons";
 
 export function ConfirmDialog({
   title,
@@ -36,13 +36,13 @@ export function ConfirmDialog({
   return (
     <Dialog title={title} description={description} onClose={busy ? () => undefined : onClose}>
       <div className="confirm-body">
-        <AlertTriangle size={22} />
+        <AppIcon name="warning" size={22} />
         {detail ? <code>{detail}</code> : null}
         {error ? <div className="inline-error">{error}</div> : null}
       </div>
       <footer className="dialog-actions">
         <button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
-        <button className="danger-button" onClick={confirm} disabled={busy}><Trash2 size={16} /> {busy ? "Deleting" : "Delete"}</button>
+        <button className="danger-button" onClick={confirm} disabled={busy}><AppIcon name="trash" size={16} /> {busy ? "Deleting" : "Delete"}</button>
       </footer>
     </Dialog>
   );

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, FolderPlus, RefreshCw, X } from "lucide-react";
+import { AppIcon } from "./components/icons";
 import { CollectionPickerDialog } from "./components/CollectionPickerDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { PlayerModal } from "./components/PlayerModal";
@@ -175,17 +175,17 @@ export function App() {
             <h1>{titleFor(page)}</h1>
           </div>
           <div className="topbar-actions">
-            {busy ? <span className="activity-pill"><RefreshCw size={14} className="spin" /> Scanning</span> : null}
+            {busy ? <span className="activity-pill"><AppIcon name="refresh" size={14} className="spin" /> Scanning</span> : null}
             <button className="icon-button" onClick={() => scan({ force: true })} disabled={busy || !rootsKey} aria-label="Refresh media" title="Refresh media">
-              <RefreshCw size={18} className={busy ? "spin" : undefined} />
+              <AppIcon name="refresh" size={18} className={busy ? "spin" : undefined} />
             </button>
           </div>
         </header>
-        {error ? <div className="error-banner"><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={16} /></button></div> : null}
-        {notice ? <div className="toast"><CheckCircle2 size={17} /> {notice}</div> : null}
+        {error ? <div className="error-banner"><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error" title="Dismiss error"><AppIcon name="close" size={16} /></button></div> : null}
+        {notice ? <div className="toast"><AppIcon name="success" size={17} /> {notice}</div> : null}
         {!snapshot && !error ? <div className="loading-grid"><i /><i /><i /><i /></div> : null}
         {snapshot && !snapshot.settings.sourceFolders.length && setupDismissed ? (
-          <button className="setup-reminder" onClick={chooseInitialSourceFolder}><FolderPlus size={18} /><span>Add a capture folder to begin</span></button>
+          <button className="setup-reminder" onClick={chooseInitialSourceFolder}><AppIcon name="add" size={18} /><span>Add a capture folder to begin</span></button>
         ) : null}
         {page === "home" && snapshot ? <HomePage snapshot={snapshot} rawItems={rawItems} clipItems={clipItems} actions={actions} onCleanup={setPendingDelete} /> : null}
         {page === "gallery" ? <GalleryPage items={rawItems} actions={actions} /> : null}
@@ -298,5 +298,5 @@ export function App() {
 }
 
 function titleFor(page: PageKey): string {
-  return { home: "Home", gallery: "Gallery", clips: "Clips", collections: "Collections", settings: "Settings" }[page];
+  return { home: "Home", gallery: "Recordings", clips: "Clips", collections: "Collections", settings: "Settings" }[page];
 }

@@ -1,5 +1,5 @@
-import { Download, FolderPlus, Save, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { AppIcon, FrameStackMark } from "../components/icons";
 import { normalizeAppError } from "../lib/api";
 import { pickFolder, pickLibraryDataExport, pickLibraryDataImport } from "../lib/dialog";
 import { formatBytes } from "../lib/format";
@@ -127,7 +127,7 @@ export function SettingsPage({
           />
         </label>
         <button className="secondary-button" onClick={addSourceFolder} title="Add a source folder">
-          <FolderPlus size={17} />
+          <AppIcon name="add" size={17} />
           Add Source Folder
         </button>
         <label>
@@ -135,7 +135,7 @@ export function SettingsPage({
           <input value={workingFolder} onChange={(event) => setWorkingFolder(event.target.value)} placeholder="Optional" />
         </label>
         <button className="secondary-button" onClick={chooseWorkingFolder} title="Choose working folder">
-          <FolderPlus size={17} />
+          <AppIcon name="add" size={17} />
           Choose Working Folder
         </button>
         <label>
@@ -143,7 +143,7 @@ export function SettingsPage({
           <input value={clipFolder} onChange={(event) => setClipFolder(event.target.value)} placeholder="Defaults to working folder" />
         </label>
         <button className="secondary-button" onClick={chooseClipFolder} title="Choose clip folder">
-          <FolderPlus size={17} />
+          <AppIcon name="add" size={17} />
           Choose Clip Folder
         </button>
       </section>
@@ -175,24 +175,24 @@ export function SettingsPage({
         <h2>Library data</h2>
         <p className="muted">Move tags, notes, collections, and clip references without copying video, thumbnails, or previews.</p>
         <button className="secondary-button" onClick={exportData} disabled={dataBusy !== null} title="Export portable library data">
-          <Download size={17} />
+          <AppIcon name="download" size={17} />
           {dataBusy === "export" ? "Exporting..." : "Export Library Data"}
         </button>
         <button className="secondary-button" onClick={importData} disabled={dataBusy !== null} title="Import portable library data">
-          <Upload size={17} />
+          <AppIcon name="upload" size={17} />
           {dataBusy === "import" ? "Importing..." : "Import Library Data"}
         </button>
         {dataStatus ? <p className="data-status">{dataStatus}</p> : null}
       </section>
       <section className="settings-panel">
         <h2>About</h2>
-        <p className="muted">Reelspace {snapshot.version}</p>
+        <div className="about-brand"><span><FrameStackMark size={44} /></span><div><strong>Reelspace {snapshot.version}</strong><small>Frame Stack alpha</small></div></div>
         <p className="muted">Local-first Windows alpha. No analytics or automatic crash uploads.</p>
       </section>
       <div className="settings-actions">
         {error ? <div className="inline-error">{error}</div> : null}
         <button className="primary-button" onClick={save} disabled={busy} title="Save settings">
-          <Save size={17} />
+          <AppIcon name="save" size={17} />
           {busy ? "Saving..." : "Save Settings"}
         </button>
       </div>

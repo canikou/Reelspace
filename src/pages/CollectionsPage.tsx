@@ -1,6 +1,6 @@
-import { ArrowLeft, FolderHeart, Plus } from "lucide-react";
 import { MediaLibrary } from "../components/MediaLibrary";
 import type { MediaActions } from "../components/MediaCard";
+import { AppIcon } from "../components/icons";
 import type { Collection, MediaItem } from "../lib/types";
 
 export function CollectionsPage({
@@ -25,7 +25,7 @@ export function CollectionsPage({
       <div className="page-stack">
         <div className="section-title collection-heading">
           <div>
-            <button className="bare-icon" onClick={onBack} aria-label="Back to collections" title="Back to collections"><ArrowLeft size={18} /></button>
+            <button className="bare-icon" onClick={onBack} aria-label="Back to collections" title="Back to collections"><AppIcon name="back" size={18} /></button>
             <h2>{selected.name}</h2>
             <span>{items.length}</span>
           </div>
@@ -39,13 +39,13 @@ export function CollectionsPage({
     <div className="page-stack">
       <div className="section-title">
         <div><h2>Collections</h2><span>{collections.length}</span></div>
-        <button onClick={onCreate} title="Create collection"><Plus size={17} /> New</button>
+        <button onClick={onCreate} title="Create collection"><AppIcon name="add" size={17} /> New</button>
       </div>
       {collections.length ? (
         <section className="collection-grid">
           {collections.map((collection) => (
             <button className="collection-card" key={collection.id} onClick={() => onSelect(collection)}>
-              <span className="collection-icon"><FolderHeart size={21} /></span>
+              <span className="collection-icon"><AppIcon name="collection" size={21} /></span>
               <span>
                 <strong>{collection.name}</strong>
                 <small>{collection.itemCount} item{collection.itemCount === 1 ? "" : "s"}</small>
@@ -54,7 +54,7 @@ export function CollectionsPage({
           ))}
         </section>
       ) : (
-        <button className="empty-state empty-action" onClick={onCreate}><Plus size={20} /> Create your first collection</button>
+        <button className="empty-state empty-action" onClick={onCreate}><AppIcon name="add" size={20} /> Create your first collection</button>
       )}
     </div>
   );

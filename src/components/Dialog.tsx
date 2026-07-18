@@ -1,5 +1,5 @@
-import { X } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef } from "react";
+import { AppIcon } from "./icons";
 
 export function Dialog({
   title,
@@ -47,7 +47,7 @@ export function Dialog({
             {description ? <p id={descriptionId}>{description}</p> : null}
           </div>
           <button className="bare-icon" aria-label="Close" title="Close" onClick={onClose}>
-            <X size={18} />
+            <AppIcon name="close" size={18} />
           </button>
         </header>
         {children}

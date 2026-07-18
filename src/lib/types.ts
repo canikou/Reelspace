@@ -85,6 +85,12 @@ export interface MediaItem {
   modifiedAt: number;
   trimStartSeconds?: number | null;
   trimEndSeconds?: number | null;
+  gameId?: string | null;
+  gameName?: string | null;
+  keepLocal?: boolean;
+  availability?: "localOnly" | "queued" | "preparing" | "uploading" | "waitingForQuota" | "processingRemote" | "archivedVerified" | "remoteOnly" | "uploadFailed" | "remoteMissing" | "multipleRemoteCopies";
+  remoteCopyCount?: number;
+  primaryRemoteUrl?: string | null;
 }
 
 export interface Collection {
