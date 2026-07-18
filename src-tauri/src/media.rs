@@ -459,10 +459,13 @@ fn is_video_file(path: &Path) -> bool {
 }
 
 pub fn normalized_path_key(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_lowercase()
+    let mut key = path.to_string_lossy().replace('/', "\\").to_lowercase();
+    if let Some(rest) = key.strip_prefix("\\\\?\\unc\\") {
+        key = format!("\\\\{rest}");
+    } else if let Some(rest) = key.strip_prefix("\\\\?\\") {
+        key = rest.to_string();
+    }
+    key.trim_end_matches('\\').to_string()
 }
 
 fn is_excluded(path: &Path, excluded_roots: &[PathBuf]) -> bool {
@@ -603,6 +606,18 @@ mod tests {
         assert_eq!(sanitize_filename(&long).chars().count(), 96);
         assert_eq!(sanitize_filename("..."), "clip");
         assert_eq!(sanitize_filename("bad/name\0"), "bad_name_");
+    }
+
+    #[test]
+    fn normalized_windows_paths_collapse_verbatim_drive_and_unc_prefixes() {
+        assert_eq!(
+            normalized_path_key(Path::new(r"\\?\D:\Captures\Clip.mp4")),
+            normalized_path_key(Path::new(r"D:\Captures\Clip.mp4"))
+        );
+        assert_eq!(
+            normalized_path_key(Path::new(r"\\?\UNC\server\share\Clip.mp4")),
+            normalized_path_key(Path::new(r"\\server\share\Clip.mp4"))
+        );
     }
 
     #[test]

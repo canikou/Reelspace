@@ -6,7 +6,7 @@ pub mod ffmpeg;
 mod jobs;
 pub mod media;
 pub mod models;
-mod portability;
+pub mod portability;
 mod recovery;
 mod state;
 mod storage;

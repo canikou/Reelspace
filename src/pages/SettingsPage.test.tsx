@@ -4,6 +4,7 @@ import type { AppSnapshot } from "../lib/types";
 import { SettingsPage } from "./SettingsPage";
 
 const snapshot: AppSnapshot = {
+  version: "0.1.1-alpha.1",
   settings: {
     sourceFolders: ["C:\\captures"],
     workingFolder: null,
@@ -51,5 +52,6 @@ describe("SettingsPage library data controls", () => {
     expect(markup).toContain("without copying video, thumbnails, or previews");
     expect(markup).toContain("Export Library Data");
     expect(markup).toContain("Import Library Data");
+    expect(markup).toContain("Reelspace 0.1.1-alpha.1");
   });
 });

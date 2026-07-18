@@ -115,6 +115,7 @@ pub fn get_app_state(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
     let media = state.db.list_media(None)?;
     let stats = storage::stats(&media, &settings);
     Ok(AppSnapshot {
+        version: env!("CARGO_PKG_VERSION").to_string(),
         settings,
         ffmpeg: state.ffmpeg.health(),
         stats,

@@ -184,6 +184,11 @@ export function SettingsPage({
         </button>
         {dataStatus ? <p className="data-status">{dataStatus}</p> : null}
       </section>
+      <section className="settings-panel">
+        <h2>About</h2>
+        <p className="muted">Reelspace {snapshot.version}</p>
+        <p className="muted">Local-first Windows alpha. No analytics or automatic crash uploads.</p>
+      </section>
       <div className="settings-actions">
         {error ? <div className="inline-error">{error}</div> : null}
         <button className="primary-button" onClick={save} disabled={busy} title="Save settings">

@@ -180,6 +180,7 @@ pub struct StorageStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
+    pub version: String,
     pub settings: AppSettings,
     pub ffmpeg: ToolHealth,
     pub stats: StorageStats,

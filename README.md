@@ -1,61 +1,80 @@
 # Reelspace
 
-Reelspace is a Rust-based Windows desktop app for managing large raw capture folders, especially Nvidia Shadowplay output.
+Your gameplay recordings, organized locally.
 
-It provides a responsive gallery, local tags and tag aliases, in-window playback, trim definitions that reference source files, clip generation through FFmpeg, storage limit warnings, raw cleanup assistance, collections, notes, and Windows Explorer integration.
+Reelspace is a Windows desktop library for browsing large capture folders, playing recordings, adding your own organization, and turning useful moments into clips—without uploading your media to a service.
 
-## Prerequisites
+> [!WARNING]
+> Reelspace is early alpha software. Back up important recordings and exported library data. The installer is not code-signed, so Windows SmartScreen may show an unknown-publisher warning.
 
-- Windows 10/11 with WebView2 runtime
-- Rust stable toolchain
-- Node.js 20+ and pnpm
-- FFmpeg and FFprobe copied to `vendor/ffmpeg/bin/ffmpeg.exe` and `vendor/ffmpeg/bin/ffprobe.exe`
+## What works today
 
-## Build And Run
+- Incremental scanning for large recording folders, including persistent probe caching and background thumbnail recovery
+- A responsive gallery with in-window playback and Windows Explorer integration
+- Custom tags, notes, collections, and collection membership
+- Trim definitions and FFmpeg-powered clip generation that retain a reference to the source recording
+- Storage usage warnings and a confirmed raw-recording cleanup flow
+- Metadata-only export and import for tags, notes, collections, memberships, and clip references
+- Local diagnostics, unclean-shutdown detection, bounded job retries, and conservative database recovery
 
-```bat
-build-run.bat
-```
+## Install on Windows
 
-This is the development runner. It prints native Vite, Cargo, and Tauri output directly in the terminal while writing the same live output to a timestamped file under `logs\runners`.
+Reelspace currently supports Windows 10/11 x64.
 
-By default it uses Tauri dev mode, which starts the frontend server and Rust desktop app together. Keep the runner open while testing: frontend edits hot-reload and Rust edits rebuild incrementally. Closing the runner window terminates its app, server, and compiler processes. The next startup also removes stale Reelspace processes and frees the dev-server port.
+1. Open the [latest Reelspace release](https://github.com/canikou/Reelspace/releases/latest).
+2. Download `Reelspace_0.1.1-alpha.1_windows_x64_setup.exe` and its `.sha256` file.
+3. Optionally verify the download in PowerShell:
 
-Useful modes:
+   ```powershell
+   (Get-FileHash .\Reelspace_0.1.1-alpha.1_windows_x64_setup.exe -Algorithm SHA256).Hash
+   Get-Content .\Reelspace_0.1.1-alpha.1_windows_x64_setup.exe.sha256
+   ```
 
-```bat
-build-run.bat --check
-build-run.bat --build-only
-```
+   The two hashes should match.
 
-`--check` runs fast validation without launching. `--build-only` compiles the debug executable without launching it. Add `--no-pause` to automation or agent checks so failures return immediately.
+4. Run the installer. If SmartScreen appears, inspect the publisher warning and choose **More info** only if the filename and checksum match this GitHub release.
 
-For a full source verification pass, run:
+## Getting started
+
+Open **Settings**, add one or more folders containing recordings, and save. Reelspace indexes supported local media and fills thumbnails in the background. Configure a working folder and clip folder before exporting clips.
+
+Use **Export Library Data** in Settings to create a portable JSON archive of your organization metadata. The archive contains file references, not video files. After moving to another computer or drive, index the local recordings first and then import the archive; Reelspace restores data only for safely matched local files. See [portable library data](docs/library-data.md) for the exact matching and conflict rules.
+
+## Privacy and local data
+
+Reelspace is local-first. It has no account, cloud sync, advertising, analytics service, or hosted crash-report collector. Your database, thumbnails, previews, recovery reports, and rotated diagnostics remain in your Windows application-data directory. Routine logs avoid full media paths, but review any diagnostic file before sharing it publicly.
+
+Exported library-data archives may contain filenames, folder references, tags, notes, and collection names. Treat them as personal data even though they contain no video or audio.
+
+## Known limits
+
+- Windows x64 only; the installer is currently unsigned.
+- Recordings must remain available on a local or Windows-accessible filesystem for playback, scanning, and clip creation.
+- There is no cloud backup, automatic updater, or online video archival.
+- Import carries organization metadata and file references, not media or application settings.
+- This alpha may still contain rough edges. Keep backups and verify generated clips before deleting any source recording.
+
+## Roadmap
+
+Near-term work focuses on large-library performance, resilient recovery, richer local organization, and safer data portability. Plans may change as the alpha is tested.
+
+Found a problem? [Open an issue](https://github.com/canikou/Reelspace/issues/new/choose) with reproduction steps and sanitized diagnostics. For security-sensitive reports, use [GitHub private vulnerability reporting](https://github.com/canikou/Reelspace/security/advisories/new). Do not attach personal recordings or unreviewed library-data exports.
+
+## Building from source
+
+Source builds require Windows 10/11 x64, Node.js 20+, pnpm, the stable Rust toolchain with `rustfmt` and `clippy`, and the Windows C++ build tools used by Tauri.
 
 ```powershell
+pnpm install --frozen-lockfile
+powershell -File scripts/prepare-ffmpeg.ps1
 pnpm build
+pnpm test
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
-pnpm audit --audit-level high
+pnpm tauri:build
 ```
 
-The Clippy component can be installed with `rustup component add clippy` when it is not present in the active stable toolchain.
+The FFmpeg preparation script downloads one pinned BtbN Windows build, verifies its archive and executable hashes, and stages only FFmpeg, FFprobe, and their license for packaging. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
-## Build Setup
-
-```bat
-build-setup.bat
-```
-
-The setup builder uses the same live logging, dependency cache, toolchain detection, and process cleanup as the development runner. It verifies the bundled FFmpeg tools, performs one optimized Tauri/NSIS build, validates the generated Windows executable, and writes the final installer to `dist\setup.exe`. Release build artifacts are retained so later setup builds can reuse them.
-
-## Local Data And Diagnostics
-
-Reelspace remains local-first. The SQLite library, disposable probe cache, thumbnail queue, thumbnails, audio previews, and rotated JSONL diagnostics live under the application data directory. Logs are capped and rotated; media content and full source paths are not sent to a service. Runner logs are written under `logs\runners` and are ignored by Git.
-
-Routine scans use exact size and nanosecond modification fingerprints. Unchanged recordings reuse persistent FFprobe data, active recordings are deferred, disconnected sources are preserved, and thumbnails are generated by a persisted single-worker background queue instead of blocking the scan.
-
-Settings can export a portable JSON library-data archive containing tags, notes, collections, clip metadata, and file references. Video, thumbnails, previews, tool paths, and application settings are never embedded. Import matches local media by exact path, remapped source-relative path, or an unambiguous file signature; records are restored only when the referenced file exists locally. Existing tags and memberships are merged, and conflicting local notes are preserved and reported.
-
-See [Portable library data](docs/library-data.md) for archive and merge behavior, and [Reliability and recovery](docs/reliability.md) for database, cache, diagnostics, and rollback guidance.
+Release candidates also run `scripts/test-release-media.ps1`. With no arguments it creates and removes its own sanitized fixtures; a custom source folder may contain one valid recording and at least one malformed `.mp4`. The harness exercises scanning, failure isolation, thumbnailing, accurate clipping, persistence, and metadata export/import without writing into the source folder.

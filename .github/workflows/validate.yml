@@ -1,0 +1,95 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - master
+      - "codex/**"
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: 11.9.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Configure stable Rust
+        shell: pwsh
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustc -vV
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: windows-x64-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: windows-x64-cargo-
+
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify source versions
+        shell: pwsh
+        run: ./scripts/check-version.ps1
+
+      - name: Provision verified FFmpeg resources
+        shell: pwsh
+        run: ./scripts/prepare-ffmpeg.ps1
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Test frontend
+        run: pnpm test
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Exercise sanitized release media pipeline
+        shell: pwsh
+        run: ./scripts/test-release-media.ps1
+
+      - name: Audit production frontend dependencies
+        run: pnpm audit --prod --audit-level high
+
+      - name: Validate Tauri NSIS build
+        run: pnpm tauri:build
+
+      - name: Verify packaged Windows executable metadata
+        shell: pwsh
+        run: ./scripts/check-windows-binary.ps1 -Path "src-tauri/target/release/reelspace.exe" -ExpectedVersion "0.1.1-alpha.1"

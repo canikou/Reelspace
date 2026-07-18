@@ -1,0 +1,132 @@
+name: Release Windows alpha
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-x64:
+    name: Build and publish Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: 11.9.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Configure stable Rust
+        shell: pwsh
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustc -vV
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: windows-x64-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: windows-x64-cargo-
+
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify tag and source versions
+        shell: pwsh
+        run: ./scripts/check-version.ps1 -Tag $env:GITHUB_REF_NAME
+
+      - name: Provision verified FFmpeg resources
+        shell: pwsh
+        run: ./scripts/prepare-ffmpeg.ps1
+
+      - name: Build and test frontend
+        run: |
+          pnpm build
+          pnpm test
+
+      - name: Check, lint, and test Rust
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Exercise sanitized release media pipeline
+        shell: pwsh
+        run: ./scripts/test-release-media.ps1
+
+      - name: Build Tauri NSIS installer
+        run: pnpm tauri:build
+
+      - name: Verify packaged Windows executable metadata
+        shell: pwsh
+        run: ./scripts/check-windows-binary.ps1 -Path "src-tauri/target/release/reelspace.exe" -ExpectedVersion ($env:GITHUB_REF_NAME.Substring(1))
+
+      - name: Name and checksum release assets
+        id: package
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $installers = @(Get-ChildItem -LiteralPath "src-tauri/target/release/bundle/nsis" -File -Filter "*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer; found $($installers.Count)."
+          }
+          $releaseDirectory = Join-Path $env:RUNNER_TEMP "reelspace-release"
+          New-Item -ItemType Directory -Path $releaseDirectory | Out-Null
+          $fileName = "Reelspace_${version}_windows_x64_setup.exe"
+          $installer = Join-Path $releaseDirectory $fileName
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $installer
+          $checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumPath = "$installer.sha256"
+          "$checksum  $fileName" | Set-Content -LiteralPath $checksumPath -Encoding ascii
+          $notes = "docs/releases/$($env:GITHUB_REF_NAME).md"
+          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
+            throw "Release notes are missing: $notes"
+          }
+          "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "checksum=$checksumPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "notes=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$($version.Contains('-').ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER: ${{ steps.package.outputs.installer }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+          NOTES: ${{ steps.package.outputs.notes }}
+          IS_PRERELEASE: ${{ steps.package.outputs.prerelease }}
+        run: |
+          $title = "Reelspace $($env:GITHUB_REF_NAME.Substring(1))"
+          if (gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY 2>$null) {
+            gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title $title --notes-file $env:NOTES
+            gh release upload $env:GITHUB_REF_NAME $env:INSTALLER $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            $arguments = @("release", "create", $env:GITHUB_REF_NAME, $env:INSTALLER, $env:CHECKSUM, "--repo", $env:GITHUB_REPOSITORY, "--verify-tag", "--title", $title, "--notes-file", $env:NOTES)
+            if ($env:IS_PRERELEASE -eq "true") {
+              $arguments += "--prerelease"
+            }
+            & gh @arguments
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

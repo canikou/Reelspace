@@ -61,6 +61,7 @@ export interface StorageStats {
 }
 
 export interface AppSnapshot {
+  version: string;
   settings: AppSettings;
   ffmpeg: ToolHealth;
   stats: StorageStats;
