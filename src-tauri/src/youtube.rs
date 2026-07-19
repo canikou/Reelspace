@@ -788,6 +788,7 @@ fn youtube_response_error_with(response: Response, message: &str) -> crate::erro
     let body = response.text().unwrap_or_default();
     let quota = body.contains("quotaExceeded") || body.contains("uploadLimitExceeded");
     let auth = status.as_u16() == 401 || body.contains("invalid_grant");
+    let message = youtube_provider_message(&body).unwrap_or(message);
     let mut error = app_error(
         if auth {
             ErrorCode::PermissionDenied
@@ -807,6 +808,42 @@ fn youtube_response_error_with(response: Response, message: &str) -> crate::erro
     ));
     error.retryable = status.is_server_error() || quota;
     error
+}
+fn youtube_provider_message(body: &str) -> Option<&'static str> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let error = value.get("error")?.as_str().unwrap_or_default();
+    let description = value
+        .get("error_description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match error {
+        "invalid_grant" => Some(
+            "Google rejected the OAuth code exchange. Restart YouTube sign-in and make sure this build uses the same Desktop OAuth client ID that opened the browser.",
+        ),
+        "redirect_uri_mismatch" => Some(
+            "Google rejected Reelspace's loopback redirect URI. The bundled OAuth client must be a Desktop app client.",
+        ),
+        "unauthorized_client" => Some(
+            "Google rejected this OAuth client. Use a Desktop app client and ensure the YouTube scopes are enabled for the Google Cloud project.",
+        ),
+        "access_denied" => Some(
+            "Google did not grant Reelspace YouTube access. If the app is in testing, add this Google account as a test user and try again.",
+        ),
+        "invalid_client" if description.contains("secret") => Some(
+            "Google rejected this OAuth client because it expects a client secret. Replace the bundled client ID with a Desktop app client that supports installed-app PKCE.",
+        ),
+        "invalid_client" => Some(
+            "Google rejected the bundled OAuth client ID. Replace it with an active Desktop app client ID.",
+        ),
+        "invalid_request" if description.contains("code_verifier") => Some(
+            "Google rejected Reelspace's PKCE verifier during YouTube sign-in. Restart the sign-in flow and try again.",
+        ),
+        "invalid_request" => Some(
+            "Google rejected the YouTube sign-in request. Check that the bundled OAuth client is a Desktop app and the YouTube API scopes are configured.",
+        ),
+        _ => None,
+    }
 }
 fn redact_provider_error(body: &str) -> String {
     body.chars()
@@ -868,5 +905,29 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(credentials.client_secret.as_deref(), Some("legacy-secret"));
+    }
+
+    #[test]
+    fn google_oauth_errors_get_actionable_messages() {
+        assert_eq!(
+            youtube_provider_message(
+                r#"{"error":"redirect_uri_mismatch","error_description":"Bad redirect"}"#
+            ),
+            Some(
+                "Google rejected Reelspace's loopback redirect URI. The bundled OAuth client must be a Desktop app client."
+            )
+        );
+        assert_eq!(
+            youtube_provider_message(
+                r#"{"error":"invalid_client","error_description":"client_secret is missing"}"#
+            ),
+            Some(
+                "Google rejected this OAuth client because it expects a client secret. Replace the bundled client ID with a Desktop app client that supports installed-app PKCE."
+            )
+        );
+        assert_eq!(
+            youtube_provider_message(r#"{"error":"quotaExceeded"}"#),
+            None
+        );
     }
 }
