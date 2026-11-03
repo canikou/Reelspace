@@ -79,7 +79,9 @@ pub struct Config {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 impl Default for Config {
@@ -113,7 +115,9 @@ pub const MIN_FREE_FLOOR_GB: u64 = 5;
 
 impl Config {
     pub fn clip_dir(&self) -> PathBuf {
-        self.clip_dir.clone().unwrap_or_else(|| self.rec_dir.join("Clips"))
+        self.clip_dir
+            .clone()
+            .unwrap_or_else(|| self.rec_dir.join("Clips"))
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -145,14 +149,28 @@ impl Config {
         if self.capture.trim().is_empty() {
             return e("capture must not be empty");
         }
-        if !["h264", "hevc", "av1", "vp8", "vp9", "hevc_hdr", "av1_hdr", "hevc_10bit", "av1_10bit"].contains(&self.codec.as_str()) {
+        if ![
+            "h264",
+            "hevc",
+            "av1",
+            "vp8",
+            "vp9",
+            "hevc_hdr",
+            "av1_hdr",
+            "hevc_10bit",
+            "av1_10bit",
+        ]
+        .contains(&self.codec.as_str())
+        {
             return Err(format!("unsupported codec '{}'", self.codec));
         }
         if self.audio_tracks.is_empty() || self.audio_tracks.iter().any(|t| t.trim().is_empty()) {
             return e("audio_tracks must contain at least one non-empty entry");
         }
         match self.session.retention {
-            Retention::Days { days: 0 } | Retention::SizeCapGb { gb: 0 } => return e("session retention value must be > 0"),
+            Retention::Days { days: 0 } | Retention::SizeCapGb { gb: 0 } => {
+                return e("session retention value must be > 0")
+            }
             _ => {}
         }
         Ok(())
@@ -160,12 +178,21 @@ impl Config {
 
     /// Parameters that force a gsr restart when changed.
     pub fn capture_params(&self) -> (String, u32, String, u32, Vec<String>, u32, PathBuf) {
-        (self.capture.clone(), self.fps, self.codec.clone(), self.bitrate_kbps, self.audio_tracks.clone(), self.clip_sec, self.rec_dir.clone())
+        (
+            self.capture.clone(),
+            self.fps,
+            self.codec.clone(),
+            self.bitrate_kbps,
+            self.audio_tracks.clone(),
+            self.clip_sec,
+            self.rec_dir.clone(),
+        )
     }
 
     pub fn load(path: &Path) -> Result<Config, String> {
         let cfg = match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str::<Config>(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+            Ok(text) => serde_json::from_str::<Config>(&text)
+                .map_err(|e| format!("{}: {e}", path.display()))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
@@ -175,12 +202,16 @@ impl Config {
 }
 
 pub fn config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"));
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"));
     base.join("reelspace/recorder.json")
 }
 
 pub fn state_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state"));
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/state"));
     base.join("reelspace")
 }
 
@@ -212,7 +243,10 @@ mod tests {
 
     #[test]
     fn partial_json_fills_defaults() {
-        let c: Config = serde_json::from_str(r#"{"mode":"session","session":{"retention":{"kind":"days","days":7}}}"#).unwrap();
+        let c: Config = serde_json::from_str(
+            r#"{"mode":"session","session":{"retention":{"kind":"days","days":7}}}"#,
+        )
+        .unwrap();
         assert_eq!(c.mode, Mode::Session);
         assert_eq!(c.session.retention, Retention::Days { days: 7 });
         assert_eq!(c.session.min_session_sec, 60);
@@ -221,13 +255,25 @@ mod tests {
 
     #[test]
     fn rejects_bad_values() {
-        let mut c = Config { min_free_gb: 4, ..Config::default() };
+        let mut c = Config {
+            min_free_gb: 4,
+            ..Config::default()
+        };
         assert!(c.validate().unwrap_err().contains("min_free_gb"));
-        c = Config { codec: "x".into(), ..Config::default() };
+        c = Config {
+            codec: "x".into(),
+            ..Config::default()
+        };
         assert!(c.validate().is_err());
-        c = Config { audio_tracks: vec![], ..Config::default() };
+        c = Config {
+            audio_tracks: vec![],
+            ..Config::default()
+        };
         assert!(c.validate().is_err());
-        c = Config { rec_dir: "rel".into(), ..Config::default() };
+        c = Config {
+            rec_dir: "rel".into(),
+            ..Config::default()
+        };
         assert!(c.validate().is_err());
         assert!(serde_json::from_str::<Config>(r#"{"mode":"bogus"}"#).is_err());
     }

@@ -36,28 +36,40 @@ pub fn is_timestamp(s: &str) -> bool {
 
 /// `^rec_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.mkv$`
 pub fn is_rec_name(name: &str) -> bool {
-    name.strip_prefix("rec_").and_then(|n| n.strip_suffix(".mkv")).is_some_and(is_timestamp)
+    name.strip_prefix("rec_")
+        .and_then(|n| n.strip_suffix(".mkv"))
+        .is_some_and(is_timestamp)
 }
 
 /// `session_<slug>_<timestamp>.mkv`
 pub fn is_session_name(name: &str) -> bool {
     name.strip_prefix("session_")
         .and_then(|n| n.strip_suffix(".mkv"))
-        .is_some_and(|n| n.len() > 20 && n.as_bytes()[n.len() - 20] == b'_' && is_timestamp(&n[n.len() - 19..]))
+        .is_some_and(|n| {
+            n.len() > 20 && n.as_bytes()[n.len() - 20] == b'_' && is_timestamp(&n[n.len() - 19..])
+        })
 }
 
 /// `Video_<timestamp>.mkv` -> timestamp
 pub fn video_timestamp(name: &str) -> Option<&str> {
-    name.strip_prefix("Video_").and_then(|n| n.strip_suffix(".mkv")).filter(|t| is_timestamp(t))
+    name.strip_prefix("Video_")
+        .and_then(|n| n.strip_suffix(".mkv"))
+        .filter(|t| is_timestamp(t))
 }
 
 /// Non-recursive listing of regular files (symlinks skipped).
 pub fn list_files(dir: &Path) -> Vec<FileInfo> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
     rd.filter_map(|e| {
         let e = e.ok()?;
         let md = std::fs::symlink_metadata(e.path()).ok()?;
-        md.is_file().then(|| FileInfo { path: e.path(), size: md.len(), mtime: md.modified().unwrap_or(SystemTime::UNIX_EPOCH) })
+        md.is_file().then(|| FileInfo {
+            path: e.path(),
+            size: md.len(),
+            mtime: md.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        })
     })
     .collect()
 }
@@ -67,10 +79,14 @@ fn name_of(f: &FileInfo) -> &str {
 }
 
 pub fn rec_total(files: &[FileInfo]) -> u64 {
-    files.iter().filter(|f| is_rec_name(name_of(f))).map(|f| f.size).sum()
+    files
+        .iter()
+        .filter(|f| is_rec_name(name_of(f)))
+        .map(|f| f.size)
+        .sum()
 }
 
-fn oldest_first<'a>(files: &'a [FileInfo], pred: impl Fn(&str) -> bool) -> Vec<&'a FileInfo> {
+fn oldest_first(files: &[FileInfo], pred: impl Fn(&str) -> bool) -> Vec<&FileInfo> {
     let mut v: Vec<_> = files.iter().filter(|f| pred(name_of(f))).collect();
     v.sort_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.path.cmp(&b.path)));
     v
@@ -92,12 +108,22 @@ pub fn select_cap_prune(files: &[FileInfo], cap_bytes: u64, headroom: u64) -> Ve
 }
 
 /// Oldest `rec_*` files (then expired sessions) to free at least `deficit` bytes. May return less if not enough exists.
-pub fn select_space_prune(files: &[FileInfo], deficit: u64, retention: &Retention, now: SystemTime) -> Vec<PathBuf> {
+pub fn select_space_prune(
+    files: &[FileInfo],
+    deficit: u64,
+    retention: &Retention,
+    now: SystemTime,
+) -> Vec<PathBuf> {
     let mut freed = 0;
     let mut out = vec![];
     let expired = expired_sessions(files, retention, now);
-    let recs = oldest_first(files, is_rec_name).into_iter().map(|f| (f.path.clone(), f.size));
-    let sess = files.iter().filter(|f| expired.contains(&f.path)).map(|f| (f.path.clone(), f.size));
+    let recs = oldest_first(files, is_rec_name)
+        .into_iter()
+        .map(|f| (f.path.clone(), f.size));
+    let sess = files
+        .iter()
+        .filter(|f| expired.contains(&f.path))
+        .map(|f| (f.path.clone(), f.size));
     for (p, s) in recs.chain(sess) {
         if freed >= deficit {
             break;
@@ -109,20 +135,31 @@ pub fn select_space_prune(files: &[FileInfo], deficit: u64, retention: &Retentio
 }
 
 /// `session_*.mkv` files past retention. `KeepForever` never expires anything.
-pub fn expired_sessions(files: &[FileInfo], retention: &Retention, now: SystemTime) -> Vec<PathBuf> {
+pub fn expired_sessions(
+    files: &[FileInfo],
+    retention: &Retention,
+    now: SystemTime,
+) -> Vec<PathBuf> {
     match retention {
         Retention::KeepForever => vec![],
         Retention::Days { days } => {
             let max = Duration::from_secs(*days as u64 * 86400);
             files
                 .iter()
-                .filter(|f| is_session_name(name_of(f)) && now.duration_since(f.mtime).is_ok_and(|age| age > max))
+                .filter(|f| {
+                    is_session_name(name_of(f))
+                        && now.duration_since(f.mtime).is_ok_and(|age| age > max)
+                })
                 .map(|f| f.path.clone())
                 .collect()
         }
         Retention::SizeCapGb { gb } => {
             let cap = gb * super::config::GB;
-            let mut total: u64 = files.iter().filter(|f| is_session_name(name_of(f))).map(|f| f.size).sum();
+            let mut total: u64 = files
+                .iter()
+                .filter(|f| is_session_name(name_of(f)))
+                .map(|f| f.size)
+                .sum();
             let mut out = vec![];
             for f in oldest_first(files, is_session_name) {
                 if total <= cap {
@@ -160,12 +197,20 @@ pub fn delete_checked(paths: &[PathBuf]) -> u64 {
 /// Delete every `rec_*.mkv` in `dir`; nothing else.
 pub fn delete_rolling_archive(dir: &Path) -> u64 {
     let files = list_files(dir);
-    let paths: Vec<_> = files.iter().filter(|f| is_rec_name(name_of(f))).map(|f| f.path.clone()).collect();
+    let paths: Vec<_> = files
+        .iter()
+        .filter(|f| is_rec_name(name_of(f)))
+        .map(|f| f.path.clone())
+        .collect();
     delete_checked(&paths)
 }
 
 fn fold(base: char, orig: char) -> char {
-    if orig.is_uppercase() { base.to_ascii_uppercase() } else { base }
+    if orig.is_uppercase() {
+        base.to_ascii_uppercase()
+    } else {
+        base
+    }
 }
 
 pub fn slugify(name: &str) -> String {
@@ -190,7 +235,11 @@ pub fn slugify(name: &str) -> String {
         out.push(c);
     }
     let out = out.trim_matches('_').to_string();
-    if out.is_empty() { "game".into() } else { out }
+    if out.is_empty() {
+        "game".into()
+    } else {
+        out
+    }
 }
 
 pub fn session_file_name(game: &str, ts: &str) -> String {
@@ -221,10 +270,16 @@ pub fn read_active(path: &Path) -> Option<ActiveRecording> {
 }
 
 /// Final name for a leftover `Video_<ts>.mkv` found at startup.
-pub fn recovered_name(video_name: &str, active: Option<&ActiveRecording>, rec_dir: &Path) -> Option<String> {
+pub fn recovered_name(
+    video_name: &str,
+    active: Option<&ActiveRecording>,
+    rec_dir: &Path,
+) -> Option<String> {
     let ts = video_timestamp(video_name)?;
     if let Some(a) = active.filter(|a| a.mode == "session" && a.dir == rec_dir) {
-        let started = DateTime::parse_from_rfc3339(&a.started_at).ok()?.naive_local();
+        let started = DateTime::parse_from_rfc3339(&a.started_at)
+            .ok()?
+            .naive_local();
         let file_ts = NaiveDateTime::parse_from_str(ts, "%Y-%m-%d_%H-%M-%S").ok()?;
         if file_ts >= started - chrono::Duration::seconds(10) {
             return Some(session_file_name(a.game.as_deref().unwrap_or("game"), ts));
@@ -234,10 +289,15 @@ pub fn recovered_name(video_name: &str, active: Option<&ActiveRecording>, rec_di
 }
 
 /// Adopt leftover `Video_*.mkv` files. Returns (old, new) pairs actually renamed. Never overwrites.
-pub fn recover_leftovers(rec_dir: &Path, active: Option<&ActiveRecording>) -> Vec<(PathBuf, PathBuf)> {
+pub fn recover_leftovers(
+    rec_dir: &Path,
+    active: Option<&ActiveRecording>,
+) -> Vec<(PathBuf, PathBuf)> {
     let mut out = vec![];
     for f in list_files(rec_dir) {
-        let Some(new) = recovered_name(name_of(&f), active, rec_dir) else { continue };
+        let Some(new) = recovered_name(name_of(&f), active, rec_dir) else {
+            continue;
+        };
         let dest = rec_dir.join(&new);
         if !dest.exists() && std::fs::rename(&f.path, &dest).is_ok() {
             if new.starts_with("session_") {
@@ -259,12 +319,15 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0)
+        .then(|| s.f_bavail as u64 * s.f_frsize as u64)
 }
 
 pub fn is_mountpoint(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let (Ok(a), Some(parent)) = (std::fs::metadata(path), path.parent()) else { return false };
+    let (Ok(a), Some(parent)) = (std::fs::metadata(path), path.parent()) else {
+        return false;
+    };
     std::fs::metadata(parent).is_ok_and(|b| a.dev() != b.dev())
 }
 
@@ -287,10 +350,20 @@ mod tests {
     #[test]
     fn name_matchers() {
         assert!(is_rec_name("rec_2026-01-02_03-04-05.mkv"));
-        for bad in ["rec_2026-01-02_03-04-05.mkv.part", "rec_x.mkv", "Rec_2026-01-02_03-04-05.mkv", "xrec_2026-01-02_03-04-05.mkv", "rec_2026-01-02_03-04-05.mp4", "clip_2026-01-02_03-04-05.mp4", "rec_2026-01-02_03-04-05.mkv\n"] {
+        for bad in [
+            "rec_2026-01-02_03-04-05.mkv.part",
+            "rec_x.mkv",
+            "Rec_2026-01-02_03-04-05.mkv",
+            "xrec_2026-01-02_03-04-05.mkv",
+            "rec_2026-01-02_03-04-05.mp4",
+            "clip_2026-01-02_03-04-05.mp4",
+            "rec_2026-01-02_03-04-05.mkv\n",
+        ] {
             assert!(!is_rec_name(bad), "{bad}");
         }
-        assert!(is_session_name("session_Elden_Ring_2026-01-02_03-04-05.mkv"));
+        assert!(is_session_name(
+            "session_Elden_Ring_2026-01-02_03-04-05.mkv"
+        ));
         assert!(!is_session_name("session_2026-01-02_03-04-05.mkv"));
         assert!(!is_session_name("rec_2026-01-02_03-04-05.mkv"));
     }
@@ -307,12 +380,20 @@ mod tests {
         ];
         // total rec=300, cap 300, headroom 150 -> target 150 -> delete oldest two
         let del = select_cap_prune(&files, 300, 150);
-        assert_eq!(del, vec![PathBuf::from("/r/rec_2026-01-01_00-00-00.mkv"), PathBuf::from("/r/rec_2026-01-02_00-00-00.mkv")]);
+        assert_eq!(
+            del,
+            vec![
+                PathBuf::from("/r/rec_2026-01-01_00-00-00.mkv"),
+                PathBuf::from("/r/rec_2026-01-02_00-00-00.mkv")
+            ]
+        );
         assert!(select_cap_prune(&files, 1000, 100).is_empty());
         // headroom larger than cap deletes all rec_ but nothing else
         let all = select_cap_prune(&files, 100, 500);
         assert_eq!(all.len(), 3);
-        assert!(all.iter().all(|p| is_rec_name(p.file_name().unwrap().to_str().unwrap())));
+        assert!(all
+            .iter()
+            .all(|p| is_rec_name(p.file_name().unwrap().to_str().unwrap())));
     }
 
     #[test]
@@ -324,10 +405,27 @@ mod tests {
         ];
         assert!(expired_sessions(&files, &Retention::KeepForever, now()).is_empty());
         let d = expired_sessions(&files, &Retention::Days { days: 30 }, now());
-        assert_eq!(d, vec![PathBuf::from("/r/session_A_2026-01-01_00-00-00.mkv")]);
-        let big = vec![fi("session_A_2026-01-01_00-00-00.mkv", 2 * super::super::config::GB, 3), fi("session_B_2026-01-02_00-00-00.mkv", super::super::config::GB, 1)];
+        assert_eq!(
+            d,
+            vec![PathBuf::from("/r/session_A_2026-01-01_00-00-00.mkv")]
+        );
+        let big = vec![
+            fi(
+                "session_A_2026-01-01_00-00-00.mkv",
+                2 * super::super::config::GB,
+                3,
+            ),
+            fi(
+                "session_B_2026-01-02_00-00-00.mkv",
+                super::super::config::GB,
+                1,
+            ),
+        ];
         let s = expired_sessions(&big, &Retention::SizeCapGb { gb: 2 }, now());
-        assert_eq!(s, vec![PathBuf::from("/r/session_A_2026-01-01_00-00-00.mkv")]);
+        assert_eq!(
+            s,
+            vec![PathBuf::from("/r/session_A_2026-01-01_00-00-00.mkv")]
+        );
     }
 
     #[test]
@@ -336,9 +434,18 @@ mod tests {
             fi("rec_2026-01-01_00-00-00.mkv", 100, 5),
             fi("session_A_2026-01-01_00-00-00.mkv", 1000, 99),
         ];
-        assert_eq!(select_space_prune(&files, 50, &Retention::Days { days: 30 }, now()).len(), 1);
-        assert_eq!(select_space_prune(&files, 500, &Retention::Days { days: 30 }, now()).len(), 2);
-        assert_eq!(select_space_prune(&files, 500, &Retention::KeepForever, now()).len(), 1);
+        assert_eq!(
+            select_space_prune(&files, 50, &Retention::Days { days: 30 }, now()).len(),
+            1
+        );
+        assert_eq!(
+            select_space_prune(&files, 500, &Retention::Days { days: 30 }, now()).len(),
+            2
+        );
+        assert_eq!(
+            select_space_prune(&files, 500, &Retention::KeepForever, now()).len(),
+            1
+        );
     }
 
     #[test]
@@ -350,7 +457,10 @@ mod tests {
 
     #[test]
     fn slugs() {
-        assert_eq!(slugify("The Witcher 3: Wild Hunt™"), "The_Witcher_3_Wild_Hunt");
+        assert_eq!(
+            slugify("The Witcher 3: Wild Hunt™"),
+            "The_Witcher_3_Wild_Hunt"
+        );
         assert_eq!(slugify("Pokémon / Café\\Ñandú"), "Pokemon_CafeNandu");
         assert_eq!(slugify("™™"), "game");
         assert_eq!(slugify("  a   b  "), "a_b");
@@ -366,19 +476,39 @@ mod tests {
             started_at: "2026-01-02T03:00:00+00:00".into(),
             dir: dir.clone(),
         };
-        assert_eq!(recovered_name("Video_2026-01-02_03-00-02.mkv", Some(&act), &dir).unwrap(), "session_Hades_II_2026-01-02_03-00-02.mkv");
+        assert_eq!(
+            recovered_name("Video_2026-01-02_03-00-02.mkv", Some(&act), &dir).unwrap(),
+            "session_Hades_II_2026-01-02_03-00-02.mkv"
+        );
         // older than the recorded start -> belongs to the rolling archive
-        assert_eq!(recovered_name("Video_2026-01-01_03-00-02.mkv", Some(&act), &dir).unwrap(), "rec_2026-01-01_03-00-02.mkv");
-        assert_eq!(recovered_name("Video_2026-01-02_03-00-02.mkv", None, &dir).unwrap(), "rec_2026-01-02_03-00-02.mkv");
-        let rolling = ActiveRecording { mode: "rolling".into(), ..act };
-        assert_eq!(recovered_name("Video_2026-01-02_03-00-02.mkv", Some(&rolling), &dir).unwrap(), "rec_2026-01-02_03-00-02.mkv");
+        assert_eq!(
+            recovered_name("Video_2026-01-01_03-00-02.mkv", Some(&act), &dir).unwrap(),
+            "rec_2026-01-01_03-00-02.mkv"
+        );
+        assert_eq!(
+            recovered_name("Video_2026-01-02_03-00-02.mkv", None, &dir).unwrap(),
+            "rec_2026-01-02_03-00-02.mkv"
+        );
+        let rolling = ActiveRecording {
+            mode: "rolling".into(),
+            ..act
+        };
+        assert_eq!(
+            recovered_name("Video_2026-01-02_03-00-02.mkv", Some(&rolling), &dir).unwrap(),
+            "rec_2026-01-02_03-00-02.mkv"
+        );
         assert!(recovered_name("random.mkv", None, &dir).is_none());
     }
 
     #[test]
     fn recover_and_delete_on_disk() {
         let d = tempfile::tempdir().unwrap();
-        for n in ["Video_2026-01-02_03-00-02.mkv", "random.mkv", "rec_2026-01-01_00-00-00.mkv", "session_X_2026-01-01_00-00-00.mkv"] {
+        for n in [
+            "Video_2026-01-02_03-00-02.mkv",
+            "random.mkv",
+            "rec_2026-01-01_00-00-00.mkv",
+            "session_X_2026-01-01_00-00-00.mkv",
+        ] {
             std::fs::write(d.path().join(n), b"x").unwrap();
         }
         std::fs::create_dir(d.path().join("Clips")).unwrap();
@@ -390,14 +520,23 @@ mod tests {
         assert_eq!(delete_rolling_archive(d.path()), 2);
         assert!(d.path().join("session_X_2026-01-01_00-00-00.mkv").exists());
         assert!(d.path().join("random.mkv").exists());
-        assert!(d.path().join("Clips/rec_2026-01-01_00-00-00.mkv").exists(), "never recursive");
+        assert!(
+            d.path().join("Clips/rec_2026-01-01_00-00-00.mkv").exists(),
+            "never recursive"
+        );
     }
 
     #[test]
     fn active_state_roundtrip() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("s/active.json");
-        let a = ActiveRecording { mode: "rolling".into(), game: None, appid: None, started_at: "2026-01-02T03:00:00+00:00".into(), dir: "/r".into() };
+        let a = ActiveRecording {
+            mode: "rolling".into(),
+            game: None,
+            appid: None,
+            started_at: "2026-01-02T03:00:00+00:00".into(),
+            dir: "/r".into(),
+        };
         write_active(&p, &a).unwrap();
         assert_eq!(read_active(&p), Some(a));
         assert!(!p.with_extension("json.tmp").exists());

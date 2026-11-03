@@ -13,7 +13,10 @@ pub enum Vdf {
 impl Vdf {
     pub fn get(&self, key: &str) -> Option<&Vdf> {
         match self {
-            Vdf::Map(m) => m.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v),
+            Vdf::Map(m) => m
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v),
             _ => None,
         }
     }
@@ -100,18 +103,32 @@ fn parse_tokens(text: &str) -> Option<Vdf> {
 }
 
 pub fn library_paths(vdf_text: &str) -> Vec<PathBuf> {
-    let Some(root) = parse_vdf(vdf_text) else { return vec![] };
-    let Some(Vdf::Map(libs)) = root.get("libraryfolders") else { return vec![] };
-    libs.iter().filter_map(|(_, v)| v.get("path")?.str().map(PathBuf::from)).collect()
+    let Some(root) = parse_vdf(vdf_text) else {
+        return vec![];
+    };
+    let Some(Vdf::Map(libs)) = root.get("libraryfolders") else {
+        return vec![];
+    };
+    libs.iter()
+        .filter_map(|(_, v)| v.get("path")?.str().map(PathBuf::from))
+        .collect()
 }
 
 pub fn manifest_name(acf_text: &str) -> Option<String> {
-    parse_vdf(acf_text)?.get("AppState")?.get("name")?.str().map(str::to_string)
+    parse_vdf(acf_text)?
+        .get("AppState")?
+        .get("name")?
+        .str()
+        .map(str::to_string)
 }
 
 fn steam_roots() -> Vec<PathBuf> {
     let h = super::config::home();
-    vec![h.join(".local/share/Steam"), h.join(".steam/steam"), h.join(".var/app/com.valvesoftware.Steam/.local/share/Steam")]
+    vec![
+        h.join(".local/share/Steam"),
+        h.join(".steam/steam"),
+        h.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    ]
 }
 
 /// Name of a Steam app from any library's appmanifest.
@@ -122,7 +139,9 @@ pub fn steam_app_name(appid: u32) -> Option<String> {
             libs.extend(library_paths(&t));
         }
         for l in libs {
-            if let Ok(t) = std::fs::read_to_string(l.join(format!("steamapps/appmanifest_{appid}.acf"))) {
+            if let Ok(t) =
+                std::fs::read_to_string(l.join(format!("steamapps/appmanifest_{appid}.acf")))
+            {
                 if let Some(n) = manifest_name(&t) {
                     return Some(n);
                 }
@@ -137,12 +156,18 @@ pub fn steam_app_name(appid: u32) -> Option<String> {
 pub type Proc = (u32, Vec<String>);
 
 pub fn scan_procs(proc_root: &Path) -> Vec<Proc> {
-    let Ok(rd) = std::fs::read_dir(proc_root) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(proc_root) else {
+        return vec![];
+    };
     rd.filter_map(|e| {
         let e = e.ok()?;
         let pid: u32 = e.file_name().to_str()?.parse().ok()?;
         let raw = std::fs::read(e.path().join("cmdline")).ok()?;
-        let args: Vec<String> = raw.split(|b| *b == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect();
+        let args: Vec<String> = raw
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
         (!args.is_empty()).then_some((pid, args))
     })
     .collect()
@@ -157,7 +182,8 @@ pub fn parse_reaper(args: &[String]) -> Option<u32> {
     if base(args.first()?) != "reaper" || !args.iter().any(|a| a == "SteamLaunch") {
         return None;
     }
-    args.iter().find_map(|a| a.strip_prefix("AppId=")?.parse().ok())
+    args.iter()
+        .find_map(|a| a.strip_prefix("AppId=")?.parse().ok())
 }
 
 /// Another gsr that would capture with a replay buffer / recording. `own_sock` excludes our own instance.
@@ -176,21 +202,44 @@ pub struct Detected {
     pub appid: Option<u32>,
 }
 
-pub fn detect(procs: &[Proc], cfg: &SessionConfig, focused_app_id: Option<&str>, name_lookup: &dyn Fn(u32) -> Option<String>) -> Vec<Detected> {
+pub fn detect(
+    procs: &[Proc],
+    cfg: &SessionConfig,
+    focused_app_id: Option<&str>,
+    name_lookup: &dyn Fn(u32) -> Option<String>,
+) -> Vec<Detected> {
     let mut out: Vec<Detected> = vec![];
-    let mut steam: Vec<u32> = procs.iter().filter_map(|(_, a)| parse_reaper(a)).filter(|id| !cfg.deny_appids.contains(id)).collect();
+    let mut steam: Vec<u32> = procs
+        .iter()
+        .filter_map(|(_, a)| parse_reaper(a))
+        .filter(|id| !cfg.deny_appids.contains(id))
+        .collect();
     steam.sort_unstable();
     steam.dedup();
     for id in steam {
-        out.push(Detected { key: format!("steam:{id}"), name: name_lookup(id).unwrap_or_else(|| format!("Steam App {id}")), appid: Some(id) });
+        out.push(Detected {
+            key: format!("steam:{id}"),
+            name: name_lookup(id).unwrap_or_else(|| format!("Steam App {id}")),
+            appid: Some(id),
+        });
     }
     for want in &cfg.game_processes {
-        if procs.iter().any(|(_, a)| base(&a[0]) == want) && !out.iter().any(|d| d.key == format!("proc:{want}")) {
-            out.push(Detected { key: format!("proc:{want}"), name: want.clone(), appid: None });
+        if procs.iter().any(|(_, a)| base(&a[0]) == want)
+            && !out.iter().any(|d| d.key == format!("proc:{want}"))
+        {
+            out.push(Detected {
+                key: format!("proc:{want}"),
+                name: want.clone(),
+                appid: None,
+            });
         }
     }
     if let Some(app) = focused_app_id.filter(|a| cfg.focus_app_ids.iter().any(|w| w == a)) {
-        out.push(Detected { key: format!("focus:{app}"), name: app.to_string(), appid: None });
+        out.push(Detected {
+            key: format!("focus:{app}"),
+            name: app.to_string(),
+            appid: None,
+        });
     }
     out
 }
@@ -220,7 +269,11 @@ pub struct Tracker {
 
 impl Tracker {
     pub fn new(grace: u32) -> Self {
-        Self { current: None, empty_polls: 0, grace }
+        Self {
+            current: None,
+            empty_polls: 0,
+            grace,
+        }
     }
 
     pub fn update(&mut self, det: &[Detected], now: std::time::Instant) -> Vec<SessionEvent> {
@@ -228,7 +281,11 @@ impl Tracker {
         match (&mut self.current, det.first()) {
             (None, Some(d)) => {
                 self.empty_polls = 0;
-                self.current = Some(Session { primary: d.clone(), games: vec![d.name.clone()], started: now });
+                self.current = Some(Session {
+                    primary: d.clone(),
+                    games: vec![d.name.clone()],
+                    started: now,
+                });
                 ev.push(SessionEvent::Started(d.clone()));
             }
             (Some(s), Some(_)) => {
@@ -272,7 +329,13 @@ mod tests {
     #[test]
     fn vdf_fixtures() {
         assert_eq!(manifest_name(ACF).as_deref(), Some("Hades II: \"Test\""));
-        assert_eq!(library_paths(LIBS), vec![PathBuf::from("/home/u/.local/share/Steam"), PathBuf::from("/mnt/data/Games")]);
+        assert_eq!(
+            library_paths(LIBS),
+            vec![
+                PathBuf::from("/home/u/.local/share/Steam"),
+                PathBuf::from("/mnt/data/Games")
+            ]
+        );
         assert!(parse_vdf("\"a\" {").is_none());
         assert!(manifest_name("garbage").is_none());
     }
@@ -288,10 +351,22 @@ mod tests {
     #[test]
     fn duplicate_matcher() {
         let sock = "/run/u/reelspace-gsr.sock";
-        assert!(is_duplicate_capture(&a("gpu-screen-recorder -w DP-1 -r 300 -o /x"), sock));
-        assert!(is_duplicate_capture(&a("/usr/bin/gpu-screen-recorder -w DP-1 -replay-storage ram"), sock));
-        assert!(!is_duplicate_capture(&a("gpu-screen-recorder -w DP-1 -o /x.mkv"), sock));
-        assert!(!is_duplicate_capture(&a("gpu-screen-recorder -w DP-1 -r 300 -ipc /run/u/reelspace-gsr.sock"), sock));
+        assert!(is_duplicate_capture(
+            &a("gpu-screen-recorder -w DP-1 -r 300 -o /x"),
+            sock
+        ));
+        assert!(is_duplicate_capture(
+            &a("/usr/bin/gpu-screen-recorder -w DP-1 -replay-storage ram"),
+            sock
+        ));
+        assert!(!is_duplicate_capture(
+            &a("gpu-screen-recorder -w DP-1 -o /x.mkv"),
+            sock
+        ));
+        assert!(!is_duplicate_capture(
+            &a("gpu-screen-recorder -w DP-1 -r 300 -ipc /run/u/reelspace-gsr.sock"),
+            sock
+        ));
         assert!(!is_duplicate_capture(&a("gsr-cli -ipc x -r"), sock));
     }
 
@@ -303,21 +378,39 @@ mod tests {
             (3, a("reaper SteamLaunch AppId=1493710 --")),
             (4, a("/opt/lutris/mygame.bin -x")),
         ];
-        let cfg = SessionConfig { game_processes: vec!["mygame.bin".into()], focus_app_ids: vec!["org.x.Game".into()], ..Default::default() };
-        let d = detect(&procs, &cfg, Some("org.x.Game"), &|id| (id == 1493710).then(|| "Hades II".to_string()));
+        let cfg = SessionConfig {
+            game_processes: vec!["mygame.bin".into()],
+            focus_app_ids: vec!["org.x.Game".into()],
+            ..Default::default()
+        };
+        let d = detect(&procs, &cfg, Some("org.x.Game"), &|id| {
+            (id == 1493710).then(|| "Hades II".to_string())
+        });
         let keys: Vec<_> = d.iter().map(|d| d.key.as_str()).collect();
-        assert_eq!(keys, vec!["steam:1493710", "proc:mygame.bin", "focus:org.x.Game"]);
+        assert_eq!(
+            keys,
+            vec!["steam:1493710", "proc:mygame.bin", "focus:org.x.Game"]
+        );
         assert_eq!(d[0].name, "Hades II");
-        assert!(detect(&procs, &cfg, Some("other"), &|_| None).iter().all(|d| d.key != "focus:other"));
+        assert!(detect(&procs, &cfg, Some("other"), &|_| None)
+            .iter()
+            .all(|d| d.key != "focus:other"));
     }
 
     #[test]
     fn tracker_sessions() {
-        let g = |n: &str| Detected { key: n.into(), name: n.into(), appid: None };
+        let g = |n: &str| Detected {
+            key: n.into(),
+            name: n.into(),
+            appid: None,
+        };
         let t0 = Instant::now();
         let mut t = Tracker::new(3);
         assert_eq!(t.update(&[g("A")], t0), vec![SessionEvent::Started(g("A"))]);
-        assert_eq!(t.update(&[g("A"), g("B")], t0), vec![SessionEvent::GameAdded("B".into())]);
+        assert_eq!(
+            t.update(&[g("A"), g("B")], t0),
+            vec![SessionEvent::GameAdded("B".into())]
+        );
         assert!(t.update(&[], t0).is_empty());
         assert!(t.update(&[g("A")], t0).is_empty()); // blip resets grace
         assert!(t.update(&[], t0).is_empty());
