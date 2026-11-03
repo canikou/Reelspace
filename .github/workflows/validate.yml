@@ -114,4 +114,4 @@ jobs:
       - name: Verify packaged Windows executable metadata
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/check-windows-binary.ps1 -Path "src-tauri/target/release/reelspace.exe" -ExpectedVersion "0.1.1-alpha.1"
+        run: ./scripts/check-windows-binary.ps1 -Path "src-tauri/target/release/reelspace.exe" -ExpectedVersion (Get-Content package.json -Raw | ConvertFrom-Json).version
