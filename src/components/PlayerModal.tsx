@@ -34,7 +34,7 @@ export function PlayerModal({ item, actions, onClose }: { item: MediaItem; actio
           </div>
           <div className="modal-actions">
             {item.kind === "raw" ? <button title="Create clip" aria-label="Create clip" onClick={() => actions.trim(item)}><AppIcon name="clip" size={18} /></button> : null}
-            <button title="Show in Explorer" aria-label="Show in Explorer" onClick={() => actions.reveal(item)}><AppIcon name="search" size={18} /></button>
+            <button title="Show in folder" aria-label="Show in folder" onClick={() => actions.reveal(item)}><AppIcon name="search" size={18} /></button>
             <button title="Edit moment tags" aria-label="Edit moment tags" onClick={() => { onClose(); actions.tags(item); }}><AppIcon name="tags" size={18} /></button>
             <button title="Edit notes" aria-label="Edit notes" onClick={() => { onClose(); actions.notes(item); }}><AppIcon name="notes" size={18} /></button>
             <button title="Add to collection" aria-label="Add to collection" onClick={() => { onClose(); actions.addToCollection(item); }}><AppIcon name="collection" size={18} /></button>
@@ -51,7 +51,7 @@ export function PlayerModal({ item, actions, onClose }: { item: MediaItem; actio
             autoPlay
             className="video-player"
             onCanPlay={() => setError(null)}
-            onError={() => setError("This file could not be opened by the embedded player. Try View in Explorer if the codec is unsupported.")}
+            onError={() => setError("This file could not be opened by the embedded player. Try Show in folder if the codec is unsupported.")}
           />
         </div>
       </section>
