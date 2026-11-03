@@ -16,13 +16,21 @@ export function PlayerModal({ item, actions, onClose }: { item: MediaItem; actio
         return;
       }
       const video = videoRef.current;
-      if (!video) return;
+      // The focused <video> and buttons handle their own keys; only act from the dialog background.
+      if (!video || event.target === video || (event.target as HTMLElement).closest?.("button, input, select, textarea")) return;
+      if (event.key === " ") { event.preventDefault(); if (video.paused) void video.play(); else video.pause(); }
       if (event.key === "ArrowLeft") video.currentTime = Math.max(0, video.currentTime - 5);
       if (event.key === "ArrowRight") video.currentTime = Math.min(video.duration || item.durationSeconds, video.currentTime + 5);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [item.durationSeconds, onClose]);
+
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    videoRef.current?.focus();
+    return () => previous?.focus();
+  }, []);
 
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -46,6 +54,7 @@ export function PlayerModal({ item, actions, onClose }: { item: MediaItem; actio
           {error ? <div className="player-error" role="alert">{error}</div> : null}
           <video
             ref={videoRef}
+            tabIndex={0}
             src={src}
             controls
             autoPlay

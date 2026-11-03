@@ -262,7 +262,7 @@ export function App() {
             </button>
           </div>
         </header>
-        {error ? <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error" title="Dismiss error"><AppIcon name="close" size={16} /></button></div> : null}
+        {error ? <div className="error-banner" role="alert"><span>{error}</span>{!snapshot ? <button className="secondary-button" onClick={() => { setError(null); refresh().catch(showError); }}>Try again</button> : null}<button onClick={() => setError(null)} aria-label="Dismiss error" title="Dismiss error"><AppIcon name="close" size={16} /></button></div> : null}
         {notice ? <div className="toast" role="status"><AppIcon name="success" size={17} /> {notice}</div> : null}
         <UpdatePrompt
           state={updateState}
@@ -280,10 +280,10 @@ export function App() {
           <button className="setup-reminder" onClick={chooseInitialSourceFolder}><AppIcon name="add" size={18} /><span>Add a capture folder to begin</span></button>
         ) : null}
         {page === "home" && snapshot ? <HomePage snapshot={snapshot} rawItems={rawItems} clipItems={clipItems} actions={actions} onCleanup={setPendingDelete} /> : null}
-        {page === "gallery" ? <GalleryPage items={rawItems} actions={actions} /> : null}
-        {page === "clips" ? <ClipsPage items={clipItems} actions={actions} highlightedId={highlightedClipId} /> : null}
-        {page === "games" ? <GamesPage games={games} onCreate={async (name) => { setGames(await api.createGame(name)); setNotice("Game created"); }} onRename={async (game, name) => { setGames(await api.renameGame(game.id, name)); await refresh(); setNotice("Game renamed and alias preserved"); }} onMerge={async (source, target) => { setGames(await api.mergeGames(source.id, target.id)); await refresh(); setNotice("Game classifications merged"); }} /> : null}
-        {page === "collections" ? (
+        {snapshot && page === "gallery" ? <GalleryPage items={rawItems} actions={actions} /> : null}
+        {snapshot && page === "clips" ? <ClipsPage items={clipItems} actions={actions} highlightedId={highlightedClipId} /> : null}
+        {snapshot && page === "games" ? <GamesPage games={games} onCreate={async (name) => { setGames(await api.createGame(name)); setNotice("Game created"); }} onRename={async (game, name) => { setGames(await api.renameGame(game.id, name)); await refresh(); setNotice("Game renamed and alias preserved"); }} onMerge={async (source, target) => { setGames(await api.mergeGames(source.id, target.id)); await refresh(); setNotice("Game classifications merged"); }} /> : null}
+        {snapshot && page === "collections" ? (
           <CollectionsPage
             collections={collections}
             selected={selectedCollection}
@@ -302,7 +302,7 @@ export function App() {
             }}
           />
         ) : null}
-        {page === "archive" ? <ArchivePage jobs={uploadJobs} onControl={async (action, jobId) => { setUploadJobs(await api.controlUploadQueue(action, jobId)); await refresh(); }} /> : null}
+        {snapshot && page === "archive" ? <ArchivePage jobs={uploadJobs} onControl={async (action, jobId) => { setUploadJobs(await api.controlUploadQueue(action, jobId)); await refresh(); }} /> : null}
         {page === "settings" && snapshot ? (
           <SettingsPage
             snapshot={snapshot}

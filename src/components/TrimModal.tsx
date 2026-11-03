@@ -164,6 +164,11 @@ export function TrimModal({
   }, [item.id]);
 
   useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    return () => previous?.focus();
+  }, []);
+
+  useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape" && !busy) onClose();
     }
@@ -366,7 +371,7 @@ export function TrimModal({
         <div className="trim-panel">
           <label className="trim-title-field">
             Clip title
-            <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Optional" />
+            <input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Optional" />
           </label>
 
           <div className="range-readout">
@@ -383,7 +388,7 @@ export function TrimModal({
             className="trim-timeline"
             onMouseDown={setTimelinePoint}
             onContextMenu={(event) => event.preventDefault()}
-            title="Left click sets IN. Right click sets OUT."
+            title="Left click sets IN. Right click sets OUT. Focus a handle and use arrow keys (Shift for 1 s)."
           >
             <div className="trim-selection" style={{ left: `${(start / duration) * 100}%`, width: `${(span / duration) * 100}%` }} />
             <div className="trim-playhead" style={{ left: `${(playhead / duration) * 100}%` }} />
