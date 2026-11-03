@@ -80,7 +80,26 @@ fn drive_space(path: &Path) -> Option<(u64, u64)> {
     (ok != 0).then_some((total, available))
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)] // statvfs field widths differ between targets
+fn drive_space(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    // statvfs on a missing folder fails; walk up to the nearest existing ancestor.
+    let existing = path.ancestors().find(|candidate| candidate.exists())?;
+    let c_path = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stats = unsafe { stats.assume_init() };
+    let fragment = stats.f_frsize as u64;
+    Some((
+        (stats.f_blocks as u64).saturating_mul(fragment),
+        (stats.f_bavail as u64).saturating_mul(fragment),
+    ))
+}
+
+#[cfg(not(any(windows, unix)))]
 fn drive_space(_path: &Path) -> Option<(u64, u64)> {
     None
 }

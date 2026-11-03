@@ -1,5 +1,5 @@
+use crate::desktop;
 use crate::error::{app_error, user_error, AppError, AppResult, ErrorCode};
-use crate::explorer;
 use crate::media;
 use crate::models::{
     AppSettings, AppSnapshot, AudioPreviewResult, AudioTrack, Collection, CreateClipRequest,
@@ -752,7 +752,7 @@ fn create_clip_inner(state: &AppState, mut request: CreateClipRequest) -> AppRes
 pub fn reveal_in_explorer(state: State<'_, AppState>, id: String) -> AppResult<()> {
     validate_id(&id, "media")?;
     let item = state.db.get_media(&id)?;
-    explorer::reveal(Path::new(&item.path))
+    desktop::reveal(Path::new(&item.path))
 }
 
 #[tauri::command]
@@ -886,7 +886,7 @@ fn validate_settings(settings: &AppSettings) -> AppResult<()> {
         {
             return Err(app_error(
                 ErrorCode::InvalidPath,
-                "Configured folders must use absolute Windows paths",
+                "Configured folders must use absolute paths",
             ));
         }
     }
@@ -935,7 +935,7 @@ fn output_roots(settings: &AppSettings) -> Vec<PathBuf> {
 fn path_is_within(path: &Path, root: &Path) -> bool {
     let path_key = media::normalized_path_key(path);
     let root_key = media::normalized_path_key(root);
-    path_key == root_key || path_key.starts_with(&format!("{root_key}\\"))
+    media::path_key_is_within(&path_key, &root_key)
 }
 
 fn belongs_to_roots(path: &Path, roots: &[PathBuf]) -> bool {
@@ -1389,6 +1389,7 @@ fn contains_forbidden_control(value: &str, allow_layout_whitespace: bool) -> boo
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn managed_root_checks_do_not_accept_sibling_prefixes() {
         assert!(path_is_within(
@@ -1401,11 +1402,36 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn generated_outputs_cannot_be_configured_inside_raw_sources() {
         let settings = AppSettings {
             source_folders: vec!["C:\\captures".to_string()],
             clip_folder: Some("C:\\captures\\clips".to_string()),
+            ..AppSettings::default()
+        };
+        let error = validate_settings(&settings).expect_err("nested output must fail");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_managed_roots_are_case_sensitive_and_reject_sibling_prefixes() {
+        assert!(path_is_within(
+            Path::new("/home/u/Clips/game/clip.mp4"),
+            Path::new("/home/u/Clips/")
+        ));
+        assert!(!path_is_within(
+            Path::new("/home/u/Clips-private/clip.mp4"),
+            Path::new("/home/u/Clips")
+        ));
+        assert!(!path_is_within(
+            Path::new("/home/u/clips/clip.mp4"),
+            Path::new("/home/u/Clips")
+        ));
+        let settings = AppSettings {
+            source_folders: vec!["/home/u/Videos".to_string()],
+            clip_folder: Some("/home/u/Videos/clips".to_string()),
             ..AppSettings::default()
         };
         let error = validate_settings(&settings).expect_err("nested output must fail");

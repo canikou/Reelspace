@@ -22,7 +22,7 @@ src-tauri/.tauri/
 *.db-wal
 logs/
 docs/benchmarks/*.json
-vendor/ffmpeg/bin/*.exe
+vendor/ffmpeg/bin/*
 !vendor/ffmpeg/bin/.gitkeep
 vendor/ffmpeg/LICENSE.txt
 .idea/

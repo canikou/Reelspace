@@ -71,7 +71,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("vendor")
         .join("ffmpeg")
         .join("bin");
-    let ffmpeg = Ffmpeg::from_paths(tool_dir.join("ffmpeg.exe"), tool_dir.join("ffprobe.exe"))?;
+    let ffmpeg = Ffmpeg::from_paths(
+        tool_dir.join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX)),
+        tool_dir.join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX)),
+    )?;
     let database_path = scratch.join("benchmark.sqlite");
     let database = Database::open(database_path.clone())?;
 

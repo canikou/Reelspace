@@ -1,33 +1,39 @@
+//! Hands files, folders, and links to the desktop shell (Explorer, Finder, or the
+//! freedesktop file manager / browser) through the official opener plugin.
 use crate::error::{app_error, user_error, AppResult, ErrorCode};
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-use std::ptr;
+use std::path::Path;
 use url::Url;
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 pub(crate) fn open_external_url(url: &str, failure_message: &str) -> AppResult<()> {
     validate_external_url(url)?;
-    let operation = wide("open");
-    let target = wide(url);
-    let result = unsafe {
-        ShellExecuteW(
-            ptr::null_mut(),
-            operation.as_ptr(),
-            target.as_ptr(),
-            ptr::null(),
-            ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    if result as isize > 32 {
-        Ok(())
-    } else {
-        Err(
-            app_error(ErrorCode::WindowsIntegrationFailed, failure_message)
-                .with_detail(format!("ShellExecuteW returned {}", result as isize)),
-        )
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|error| {
+        app_error(ErrorCode::WindowsIntegrationFailed, failure_message)
+            .with_detail(error.to_string())
+    })
+}
+
+pub fn reveal(path: &Path) -> AppResult<()> {
+    if !path.is_file() {
+        return Err(app_error(
+            ErrorCode::FileNotFound,
+            "The file does not exist on disk",
+        ));
     }
+    let canonical = path.canonicalize()?;
+    tauri_plugin_opener::reveal_item_in_dir(&canonical).map_err(|error| {
+        app_error(
+            ErrorCode::WindowsIntegrationFailed,
+            "The file manager could not reveal the file",
+        )
+        .with_detail(error.to_string())
+    })
+}
+
+pub(crate) fn open_folder(path: &Path, failure_message: &str) -> AppResult<()> {
+    tauri_plugin_opener::open_path(path, None::<&str>).map_err(|error| {
+        app_error(ErrorCode::WindowsIntegrationFailed, failure_message)
+            .with_detail(error.to_string())
+    })
 }
 
 fn validate_external_url(value: &str) -> AppResult<()> {
@@ -46,10 +52,6 @@ fn validate_external_url(value: &str) -> AppResult<()> {
         ));
     }
     Ok(())
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    OsStr::new(value).encode_wide().chain(Some(0)).collect()
 }
 
 #[cfg(test)]
@@ -75,15 +77,5 @@ mod tests {
                 "accepted {invalid:?}"
             );
         }
-    }
-
-    #[test]
-    fn wide_strings_are_null_terminated_without_changing_text() {
-        let encoded = wide("open");
-        assert_eq!(encoded.last(), Some(&0));
-        assert_eq!(
-            String::from_utf16(&encoded[..encoded.len() - 1]).unwrap(),
-            "open"
-        );
     }
 }

@@ -77,44 +77,44 @@ impl Ffmpeg {
     }
 
     pub fn discover(app: &AppHandle) -> Self {
-        let bundled_ffmpeg = app
-            .path()
-            .resolve("vendor/ffmpeg/bin/ffmpeg.exe", BaseDirectory::Resource)
-            .ok()
-            .filter(|path| path.exists());
-        let bundled_ffprobe = app
-            .path()
-            .resolve("vendor/ffmpeg/bin/ffprobe.exe", BaseDirectory::Resource)
-            .ok()
-            .filter(|path| path.exists());
+        let ffmpeg_name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
+        let ffprobe_name = format!("ffprobe{}", std::env::consts::EXE_SUFFIX);
+        let bundled = |name: &str| {
+            app.path()
+                .resolve(format!("vendor/ffmpeg/bin/{name}"), BaseDirectory::Resource)
+                .ok()
+                .filter(|path| path.exists())
+        };
+        let bundled_ffmpeg = bundled(&ffmpeg_name);
+        let bundled_ffprobe = bundled(&ffprobe_name);
 
         // `cargo tauri dev` and packaged builds do not share a predictable
         // working directory. Anchor the development fallback to this crate so
         // media features keep working regardless of how Reelspace was launched.
         #[cfg(debug_assertions)]
-        let manifest_vendor = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("vendor")
-            .join("ffmpeg")
-            .join("bin");
-        #[cfg(debug_assertions)]
-        let manifest_ffmpeg = existing_file(manifest_vendor.join("ffmpeg.exe"));
-        #[cfg(debug_assertions)]
-        let manifest_ffprobe = existing_file(manifest_vendor.join("ffprobe.exe"));
-        #[cfg(debug_assertions)]
-        let ffmpeg_path = bundled_ffmpeg
-            .or(manifest_ffmpeg)
-            .or_else(|| first_existing(["vendor/ffmpeg/bin/ffmpeg.exe"]))
-            .or_else(|| which::which("ffmpeg").ok());
-        #[cfg(debug_assertions)]
-        let ffprobe_path = bundled_ffprobe
-            .or(manifest_ffprobe)
-            .or_else(|| first_existing(["vendor/ffmpeg/bin/ffprobe.exe"]))
-            .or_else(|| which::which("ffprobe").ok());
+        let (ffmpeg_path, ffprobe_path) = {
+            let manifest_vendor = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("vendor")
+                .join("ffmpeg")
+                .join("bin");
+            (
+                bundled_ffmpeg
+                    .or_else(|| existing_file(manifest_vendor.join(&ffmpeg_name)))
+                    .or_else(|| {
+                        existing_file(PathBuf::from("vendor/ffmpeg/bin").join(&ffmpeg_name))
+                    })
+                    .or_else(|| which::which("ffmpeg").ok()),
+                bundled_ffprobe
+                    .or_else(|| existing_file(manifest_vendor.join(&ffprobe_name)))
+                    .or_else(|| {
+                        existing_file(PathBuf::from("vendor/ffmpeg/bin").join(&ffprobe_name))
+                    })
+                    .or_else(|| which::which("ffprobe").ok()),
+            )
+        };
         #[cfg(not(debug_assertions))]
-        let ffmpeg_path = bundled_ffmpeg;
-        #[cfg(not(debug_assertions))]
-        let ffprobe_path = bundled_ffprobe;
+        let (ffmpeg_path, ffprobe_path) = (bundled_ffmpeg, bundled_ffprobe);
 
         Self {
             ffmpeg_path,
@@ -131,7 +131,10 @@ impl Ffmpeg {
             message: if ready {
                 "FFmpeg and FFprobe are ready".to_string()
             } else {
-                "Copy ffmpeg.exe and ffprobe.exe into vendor/ffmpeg/bin".to_string()
+                format!(
+                    "Copy ffmpeg{0} and ffprobe{0} into vendor/ffmpeg/bin",
+                    std::env::consts::EXE_SUFFIX
+                )
             },
         }
     }
@@ -441,6 +444,7 @@ fn thumbnail_command(ffmpeg: &Path, source: &Path, output_path: &Path, timestamp
 }
 
 fn media_command(executable: &Path) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut command = Command::new(executable);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
@@ -602,14 +606,6 @@ fn unique_audio_temp_path(output_path: &Path) -> PathBuf {
 #[cfg(debug_assertions)]
 fn existing_file(path: PathBuf) -> Option<PathBuf> {
     path.is_file().then_some(path)
-}
-
-#[cfg(debug_assertions)]
-fn first_existing<const N: usize>(candidates: [&str; N]) -> Option<PathBuf> {
-    candidates
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
 }
 
 fn display_path(path: &Path) -> String {

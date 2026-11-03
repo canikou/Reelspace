@@ -1,8 +1,8 @@
 use crate::db::Database;
+use crate::desktop::open_external_url;
 use crate::error::{app_error, user_error, AppResult, ErrorCode};
 use crate::models::ArchiveAccount;
 use crate::state::AppState;
-use crate::windows_integration::open_external_url;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use keyring::Entry;
@@ -762,7 +762,7 @@ fn load_credentials() -> AppResult<StoredCredentials> {
 fn credential_error(error: keyring::Error) -> crate::error::AppError {
     app_error(
         ErrorCode::PermissionDenied,
-        "YouTube credentials could not be accessed in Windows Credential Manager",
+        "YouTube credentials could not be accessed in the system credential store",
     )
     .with_detail(error.to_string())
 }

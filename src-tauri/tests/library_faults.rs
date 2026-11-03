@@ -24,8 +24,11 @@ fn tools() -> Ffmpeg {
         .join("vendor")
         .join("ffmpeg")
         .join("bin");
-    Ffmpeg::from_paths(directory.join("ffmpeg.exe"), directory.join("ffprobe.exe"))
-        .expect("bundled tools")
+    Ffmpeg::from_paths(
+        directory.join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX)),
+        directory.join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .expect("bundled tools")
 }
 
 #[test]

@@ -74,7 +74,10 @@ fn run_smoke(
         .join("vendor")
         .join("ffmpeg")
         .join("bin");
-    let ffmpeg = Ffmpeg::from_paths(tool_root.join("ffmpeg.exe"), tool_root.join("ffprobe.exe"))?;
+    let ffmpeg = Ffmpeg::from_paths(
+        tool_root.join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX)),
+        tool_root.join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX)),
+    )?;
     let thumbnail_root = scratch.join("thumbnails");
     fs::create_dir_all(&thumbnail_root)?;
     let database = Database::open(scratch.join("source.sqlite"))?;

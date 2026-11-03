@@ -1,7 +1,7 @@
 mod commands;
 pub mod db;
+mod desktop;
 pub mod error;
-mod explorer;
 mod features;
 pub mod ffmpeg;
 mod jobs;
@@ -13,7 +13,6 @@ mod state;
 mod storage;
 mod telemetry;
 mod watcher;
-mod windows_integration;
 mod youtube;
 
 use commands::*;
@@ -33,6 +32,7 @@ pub fn run() -> error::AppResult<()> {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {

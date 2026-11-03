@@ -1,0 +1,21 @@
+{
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../vendor/ffmpeg/bin/ffmpeg.exe": "vendor/ffmpeg/bin/ffmpeg.exe",
+      "../vendor/ffmpeg/bin/ffprobe.exe": "vendor/ffmpeg/bin/ffprobe.exe",
+      "../vendor/ffmpeg/LICENSE.txt": "vendor/ffmpeg/LICENSE.txt"
+    },
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installMode": "perMachine"
+      }
+    }
+  }
+}

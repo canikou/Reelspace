@@ -1,11 +1,11 @@
 use crate::db::Database;
+use crate::desktop::{open_external_url, open_folder};
 use crate::error::{app_error, user_error, AppResult, ErrorCode};
 use crate::models::{
     ArchiveStatus, Game, GameAssignment, MediaEvent, MediaItem, RecorderApp, RepairSummary,
     UploadJob,
 };
 use crate::state::AppState;
-use crate::windows_integration::open_external_url;
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -675,15 +675,28 @@ pub fn launch_recording_app(state: State<'_, AppState>, id: String) -> AppResult
         .into_iter()
         .find(|app| app.id == id)
         .ok_or_else(|| user_error("recording application is no longer available"))?;
-    std::process::Command::new(&app.executable_path)
-        .spawn()
-        .map_err(|error| {
-            app_error(
-                ErrorCode::WindowsIntegrationFailed,
-                "The recording application could not be launched",
-            )
-            .with_detail(error.to_string())
-        })?;
+    let mut command = std::process::Command::new(&app.executable_path);
+    if std::env::var_os("APPIMAGE").is_some() {
+        // Don't leak the AppImage's bundled library/plugin paths into the recorder.
+        for key in [
+            "LD_LIBRARY_PATH",
+            "GST_PLUGIN_PATH",
+            "GST_PLUGIN_SYSTEM_PATH",
+            "GST_PLUGIN_SYSTEM_PATH_1_0",
+            "GST_PLUGIN_SCANNER",
+            "GIO_MODULE_DIR",
+            "GDK_PIXBUF_MODULE_FILE",
+        ] {
+            command.env_remove(key);
+        }
+    }
+    command.spawn().map_err(|error| {
+        app_error(
+            ErrorCode::WindowsIntegrationFailed,
+            "The recording application could not be launched",
+        )
+        .with_detail(error.to_string())
+    })?;
     Ok(())
 }
 
@@ -713,14 +726,18 @@ pub fn remove_local_copy(
     trash::delete(path).map_err(|error| {
         app_error(
             ErrorCode::PermissionDenied,
-            "The local copy could not be moved to the Recycle Bin",
+            "The local copy could not be moved to the trash",
         )
         .with_detail(error.to_string())
     })?;
     state.db.record_media_event(
         &media_id,
         "local_copy_removed",
-        Some("Moved to Windows Recycle Bin"),
+        Some(if cfg!(windows) {
+            "Moved to Windows Recycle Bin"
+        } else {
+            "Moved to trash"
+        }),
     )?;
     state.db.list_archive_statuses()
 }
@@ -764,17 +781,7 @@ pub fn repair_library(state: State<'_, AppState>) -> AppResult<RepairSummary> {
 pub fn open_diagnostics_folder(state: State<'_, AppState>) -> AppResult<()> {
     let path = state.data_dir.join("logs");
     std::fs::create_dir_all(&path)?;
-    std::process::Command::new("explorer.exe")
-        .arg(path)
-        .spawn()
-        .map_err(|error| {
-            app_error(
-                ErrorCode::WindowsIntegrationFailed,
-                "The diagnostics folder could not be opened",
-            )
-            .with_detail(error.to_string())
-        })?;
-    Ok(())
+    open_folder(&path, "The diagnostics folder could not be opened")
 }
 
 #[tauri::command]
@@ -812,6 +819,7 @@ pub fn export_diagnostics(state: State<'_, AppState>, path: String) -> AppResult
     Ok(())
 }
 
+#[cfg(windows)]
 fn recorder_candidates() -> Vec<(String, String, PathBuf)> {
     let program_files = std::env::var_os("ProgramFiles")
         .map(PathBuf::from)
@@ -857,6 +865,37 @@ fn recorder_candidates() -> Vec<(String, String, PathBuf)> {
     ]
 }
 
+#[cfg(not(windows))]
+fn recorder_candidates() -> Vec<(String, String, PathBuf)> {
+    // Only GUI recorders: launching a bare capture CLI (e.g. `gpu-screen-recorder`)
+    // would start a second capture. CLI save-replay scripts go in "Preferred recorder".
+    let user_flatpak = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".local/share/flatpak/exports/bin"))
+        .unwrap_or_default();
+    let system_flatpak = PathBuf::from("/var/lib/flatpak/exports/bin");
+    let mut candidates = Vec::new();
+    for (id, name, binary, flatpak_id) in [
+        ("obs", "OBS Studio", "obs", "com.obsproject.Studio"),
+        (
+            "gpu-screen-recorder",
+            "GPU Screen Recorder",
+            "gpu-screen-recorder-gtk",
+            "com.dec05eba.gpu_screen_recorder",
+        ),
+    ] {
+        let native =
+            which::which(binary).unwrap_or_else(|_| PathBuf::from("/usr/bin").join(binary));
+        for path in [
+            native,
+            user_flatpak.join(flatpak_id),
+            system_flatpak.join(flatpak_id),
+        ] {
+            candidates.push((id.to_string(), name.to_string(), path));
+        }
+    }
+    candidates
+}
+
 fn game_label_for_path(path: &Path) -> Option<String> {
     let generic = [
         "clips",
@@ -866,16 +905,22 @@ fn game_label_for_path(path: &Path) -> Option<String> {
         "medal",
         "shadowplay",
     ];
-    let mut parent = path.parent()?;
-    let mut label = parent.file_name()?.to_string_lossy().trim().to_owned();
-    if generic
-        .iter()
-        .any(|value| label.eq_ignore_ascii_case(value))
-    {
-        parent = parent.parent()?;
-        label = parent.file_name()?.to_string_lossy().trim().to_owned();
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    // Skip generic folders (e.g. ~/Videos/Recordings/Clips) but never label a clip
+    // with the user's home-folder name or a drive root.
+    for folder in path.ancestors().skip(1) {
+        if home.as_deref() == Some(folder) {
+            return None;
+        }
+        let label = folder.file_name()?.to_string_lossy().trim().to_owned();
+        if !generic
+            .iter()
+            .any(|value| label.eq_ignore_ascii_case(value))
+        {
+            return (!label.is_empty()).then_some(label);
+        }
     }
-    (!label.is_empty()).then_some(label)
+    None
 }
 
 fn validated_game_name(name: &str) -> AppResult<&str> {
@@ -923,10 +968,25 @@ fn archive_state(job: &str, copies: u64, verified: bool, local: bool) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
     #[test]
     fn game_labels_ignore_generic_capture_directories() {
         assert_eq!(
             game_label_for_path(Path::new(r"D:\Medal\Once Human\Clips\capture.mp4")).as_deref(),
+            Some("Once Human")
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn game_labels_never_fall_back_to_the_home_folder() {
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        let clip = home.join("Videos/Recordings/Clips/clip_2026-11-03_10-39-11.mp4");
+        assert_eq!(game_label_for_path(&clip), None);
+        assert_eq!(
+            game_label_for_path(Path::new("/mnt/games/Once Human/Clips/capture.mp4")).as_deref(),
             Some("Once Human")
         );
     }

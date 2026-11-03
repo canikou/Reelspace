@@ -13,3 +13,5 @@
 *.ico binary
 *.png binary
 *.pdf binary
+*.sh text eol=lf
+PKGBUILD text eol=lf

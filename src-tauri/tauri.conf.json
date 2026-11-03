@@ -32,25 +32,25 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": ["nsis"],
-    "icon": ["icons/icon.ico"],
-    "resources": {
-      "../vendor/ffmpeg/bin/ffmpeg.exe": "vendor/ffmpeg/bin/ffmpeg.exe",
-      "../vendor/ffmpeg/bin/ffprobe.exe": "vendor/ffmpeg/bin/ffprobe.exe",
-      "../vendor/ffmpeg/LICENSE.txt": "vendor/ffmpeg/LICENSE.txt"
-    },
-    "windows": {
-      "nsis": {
-        "displayLanguageSelector": false,
-        "installMode": "perMachine"
-      }
-    }
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "category": "Video",
+    "shortDescription": "Local library for gameplay recordings and clips"
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1NDFFRjM3QzZFRTcwRDAKUldUUWNPN0dOKzlCeFg3M1ZsTUIxakJuVjA3S2NjS2xOMXVyQ2NHZll2bGx5V1ltS1dlRnFmeEMK",
-      "endpoints": ["https://github.com/canikou/Reelspace/releases/download/updater-alpha/latest.json"],
-      "windows": { "installMode": "passive" }
+      "endpoints": [
+        "https://github.com/canikou/Reelspace/releases/download/updater-alpha/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

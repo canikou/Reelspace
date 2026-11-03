@@ -837,7 +837,8 @@ fn relative_to_roots(path: &Path, roots: &[PathBuf]) -> Option<String> {
     roots.iter().find_map(|root| {
         let root_key = normalized_path_key(root);
         path_key
-            .strip_prefix(&format!("{root_key}\\"))
+            .strip_prefix(&root_key)
+            .and_then(|rest| rest.strip_prefix(crate::media::PATH_KEY_SEPARATOR))
             .filter(|relative| !relative.is_empty())
             .map(str::to_string)
     })
@@ -845,10 +846,9 @@ fn relative_to_roots(path: &Path, roots: &[PathBuf]) -> Option<String> {
 
 fn path_is_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
     let path_key = normalized_path_key(path);
-    roots.iter().any(|root| {
-        let root_key = normalized_path_key(root);
-        path_key == root_key || path_key.starts_with(&format!("{root_key}\\"))
-    })
+    roots
+        .iter()
+        .any(|root| crate::media::path_key_is_within(&path_key, &normalized_path_key(root)))
 }
 
 fn merge_tags(existing: &[String], imported: &[String]) -> AppResult<(Vec<String>, bool)> {
@@ -933,24 +933,43 @@ fn validate_id(id: &str, kind: &str) -> AppResult<()> {
 
 fn validate_path_text(path: &str, label: &str) -> AppResult<()> {
     let lower = path.to_ascii_lowercase();
-    let invalid_component = Path::new(path)
-        .components()
-        .any(|component| match component {
-            Component::CurDir | Component::ParentDir => true,
-            Component::Normal(value) => value.to_string_lossy().contains(':'),
-            _ => false,
-        });
+    // Archives can come from another OS (e.g. a Windows `C:\\` path imported on
+    // Linux). Such paths never resolve locally; they are kept only as lookup keys.
+    let foreign = !Path::new(path).is_absolute() && is_foreign_absolute(path);
+    let invalid_component = if foreign {
+        path.split(['/', '\\'])
+            .skip(1)
+            .any(|segment| matches!(segment, "." | "..") || segment.contains(':'))
+    } else {
+        Path::new(path)
+            .components()
+            .any(|component| match component {
+                Component::CurDir | Component::ParentDir => true,
+                Component::Normal(value) => value.to_string_lossy().contains(':'),
+                _ => false,
+            })
+    };
     if path.is_empty()
         || path.len() > MAX_PATH_BYTES
         || contains_forbidden_control(path, false)
         || lower.starts_with("\\\\.\\")
         || lower.starts_with("\\\\?\\globalroot")
         || invalid_component
-        || !Path::new(path).is_absolute()
+        || !(foreign || Path::new(path).is_absolute())
     {
         return Err(user_error(format!("an imported {label} is invalid")));
     }
     Ok(())
+}
+
+/// A Windows drive path (`C:\\…`) or a Unix absolute path (`/…`), regardless of host OS.
+fn is_foreign_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'))
 }
 
 fn validate_relative_path(path: &str) -> AppResult<()> {
@@ -958,6 +977,9 @@ fn validate_relative_path(path: &str) -> AppResult<()> {
         || path.len() > MAX_PATH_BYTES
         || contains_forbidden_control(path, false)
         || path.contains(':')
+        || path
+            .split(['/', '\\'])
+            .any(|segment| matches!(segment, "" | "." | ".."))
         || Path::new(path)
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
