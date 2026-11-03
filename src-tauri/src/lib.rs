@@ -8,6 +8,8 @@ mod jobs;
 pub mod media;
 pub mod models;
 pub mod portability;
+#[cfg(target_os = "linux")]
+pub mod recorder;
 mod recovery;
 mod state;
 mod storage;

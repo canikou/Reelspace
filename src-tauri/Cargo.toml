@@ -9,6 +9,10 @@ edition = "2021"
 name = "reelspace_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "reelspace-recorder"
+path = "src/bin/reelspace-recorder.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -42,3 +46,10 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+xattr = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -3405,12 +3405,15 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "thiserror 1.0.69",
  "trash",
  "url",
  "walkdir",
  "which",
  "windows-sys 0.59.0",
+ "xattr",
+ "zbus 5.18.0",
 ]
 
 [[package]]
