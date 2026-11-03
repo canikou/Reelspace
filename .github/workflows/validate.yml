@@ -107,7 +107,7 @@ jobs:
         run: pnpm audit --prod --audit-level high
 
       - name: Validate Tauri bundle build
-        run: pnpm tauri build --config src-tauri/tauri.prod.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: pnpm tauri build --config src-tauri/tauri.prod.conf.json --config src-tauri/tauri.unsigned.conf.json
 
       - name: Verify packaged Windows executable metadata
         if: runner.os == 'Windows'
