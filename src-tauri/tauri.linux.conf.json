@@ -21,7 +21,11 @@
         "recommends": [
           "gstreamer1.0-libav"
         ],
-        "section": "video"
+        "section": "video",
+        "files": {
+          "/usr/bin/reelspace-recorder": "target/release/reelspace-recorder",
+          "/usr/lib/systemd/user/reelspace-recorder.service": "../packaging/linux/reelspace-recorder.service"
+        }
       },
       "rpm": {
         "depends": [
@@ -29,7 +33,11 @@
         ],
         "recommends": [
           "gstreamer1-plugin-libav"
-        ]
+        ],
+        "files": {
+          "/usr/bin/reelspace-recorder": "target/release/reelspace-recorder",
+          "/usr/lib/systemd/user/reelspace-recorder.service": "../packaging/linux/reelspace-recorder.service"
+        }
       }
     }
   }
