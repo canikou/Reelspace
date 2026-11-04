@@ -93,7 +93,16 @@ fn client(args: &[String]) -> Result<(), String> {
                 .unwrap_or(0);
             let id: String = p.call("SaveClip", &(secs,)).map_err(e)?;
             if id.is_empty() {
-                eprintln!("a clip save is already in progress");
+                let m: HashMap<String, OwnedValue> = p.call("Status", &()).map_err(e)?;
+                let paused = json_of(m).get("state").and_then(|v| v.as_str()) == Some("paused");
+                eprintln!(
+                    "{}",
+                    if paused {
+                        "recorder is paused; resume to save clips"
+                    } else {
+                        "a clip save is already in progress"
+                    }
+                );
             }
         }
         "status" => {
