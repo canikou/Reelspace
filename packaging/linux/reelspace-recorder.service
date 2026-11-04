@@ -1,0 +1,14 @@
+[Unit]
+Description=Reelspace recorder
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.service pipewire-pulse.service
+
+[Service]
+ExecStart=/usr/bin/reelspace-recorder
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=40
+
+[Install]
+WantedBy=graphical-session.target

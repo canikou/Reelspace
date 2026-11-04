@@ -1,0 +1,8 @@
+{
+  "uuid": "reelspace@reelspace.app",
+  "name": "Reelspace",
+  "description": "Shows Reelspace recorder notices (clip saved, session recording, errors) on top of fullscreen games, and tells Reelspace which window is focused so it can tag clips by game.",
+  "shell-version": ["49", "50", "51"],
+  "url": "https://github.com/canikou/reelspace",
+  "version-name": "0.1.0"
+}

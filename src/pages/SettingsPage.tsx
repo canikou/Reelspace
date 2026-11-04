@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { RecorderSettings } from "../components/RecorderSettings";
 import { AppIcon, FrameStackMark } from "../components/icons";
 import { api, normalizeAppError } from "../lib/api";
 import { pickDiagnosticsExport, pickFolder, pickLibraryDataExport, pickLibraryDataImport } from "../lib/dialog";
@@ -48,7 +49,12 @@ export function SettingsPage({
   const [dataBusy, setDataBusy] = useState<"export" | "import" | null>(null);
   const [dataStatus, setDataStatus] = useState<string | null>(null);
   const [pendingImport, setPendingImport] = useState<string | null>(null);
+  const [recorderSupported, setRecorderSupported] = useState(false);
   const saveInFlight = useRef(false);
+
+  useEffect(() => {
+    api.recorderSupported().then(setRecorderSupported).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     setSourceFolders(snapshot.settings.sourceFolders.join("\n"));
@@ -244,6 +250,7 @@ export function SettingsPage({
         <label className="toggle-row"><input type="checkbox" checked={pauseUploadsWhileRecording} onChange={(event) => setPauseUploadsWhileRecording(event.target.checked)} /><span>Pause archive uploads while recording</span></label>
         <p className="muted">Recorder launch is a separate local shortcut and never changes archive state.</p>
       </section>
+      {recorderSupported ? <RecorderSettings /> : null}
       <section className="settings-panel">
         <h2>Archive defaults</h2>
         <label className="toggle-row"><input type="checkbox" checked={automaticallyArchiveRecordings} onChange={(event) => setAutomaticallyArchiveRecordings(event.target.checked)} /><span>Automatically queue new recordings</span></label>

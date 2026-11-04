@@ -195,3 +195,56 @@ export interface AudioPreviewResult {
   elapsedMs: number;
   bytes: number;
 }
+
+export type RecorderMode = "session" | "manual" | "rolling";
+export type RecorderRetention = { kind: "keep_forever" } | { kind: "days"; days: number } | { kind: "size_cap_gb"; gb: number };
+
+/** Mirrors `Config` in src-tauri/src/recorder/config.rs (snake_case on disk and over IPC). */
+export interface RecorderConfig {
+  mode: RecorderMode;
+  rec_dir: string;
+  clip_dir: string | null;
+  cap_gb: number;
+  chunk_sec: number;
+  clip_sec: number;
+  bitrate_kbps: number;
+  fps: number;
+  capture: string;
+  codec: string;
+  replay_storage: "disk" | "ram";
+  audio_tracks: string[];
+  require_mountpoint: boolean;
+  min_free_gb: number;
+  session: {
+    retention: RecorderRetention;
+    min_session_sec: number;
+    deny_appids: number[];
+    game_processes: string[];
+    focus_app_ids: string[];
+  };
+  sounds: boolean;
+  notifications: boolean;
+  ffmpeg_path: string;
+  gsr_path: string;
+  gsr_cli_path: string;
+}
+
+export interface RecorderStatus {
+  running: boolean;
+  state: string;
+  detail?: string;
+  mode?: string;
+  replay_seconds?: number;
+  archive_bytes?: number;
+  cap_bytes?: number;
+  free_bytes?: number;
+  min_free_bytes?: number;
+  archive_hours_estimate?: number;
+  session_game?: string;
+  last_error?: string;
+}
+
+export interface RecorderServiceState {
+  enabled: string;
+  active: string;
+}

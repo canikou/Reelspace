@@ -3383,7 +3383,7 @@ dependencies = [
 
 [[package]]
 name = "reelspace"
-version = "0.2.0-alpha.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3405,12 +3405,15 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "thiserror 1.0.69",
  "trash",
  "url",
  "walkdir",
  "which",
  "windows-sys 0.59.0",
+ "xattr",
+ "zbus 5.18.0",
 ]
 
 [[package]]

@@ -21,7 +21,14 @@
         "recommends": [
           "gstreamer1.0-libav"
         ],
-        "section": "video"
+        "section": "video",
+        "files": {
+          "/usr/bin/reelspace-recorder": "target/release/reelspace-recorder",
+          "/usr/lib/systemd/user/reelspace-recorder.service": "../packaging/linux/reelspace-recorder.service",
+          "/usr/share/gnome-shell/extensions/reelspace@reelspace.app/metadata.json": "../packaging/gnome-extension/reelspace@reelspace.app/metadata.json",
+          "/usr/share/gnome-shell/extensions/reelspace@reelspace.app/extension.js": "../packaging/gnome-extension/reelspace@reelspace.app/extension.js",
+          "/usr/share/gnome-shell/extensions/reelspace@reelspace.app/osd.js": "../packaging/gnome-extension/reelspace@reelspace.app/osd.js"
+        }
       },
       "rpm": {
         "depends": [
@@ -29,8 +36,18 @@
         ],
         "recommends": [
           "gstreamer1-plugin-libav"
-        ]
+        ],
+        "files": {
+          "/usr/bin/reelspace-recorder": "target/release/reelspace-recorder",
+          "/usr/lib/systemd/user/reelspace-recorder.service": "../packaging/linux/reelspace-recorder.service",
+          "/usr/share/gnome-shell/extensions/reelspace@reelspace.app/metadata.json": "../packaging/gnome-extension/reelspace@reelspace.app/metadata.json",
+          "/usr/share/gnome-shell/extensions/reelspace@reelspace.app/extension.js": "../packaging/gnome-extension/reelspace@reelspace.app/extension.js",
+          "/usr/share/gnome-shell/extensions/reelspace@reelspace.app/osd.js": "../packaging/gnome-extension/reelspace@reelspace.app/osd.js"
+        }
       }
     }
+  },
+  "build": {
+    "beforeBundleCommand": "cargo build --release --manifest-path src-tauri/Cargo.toml --bin reelspace-recorder"
   }
 }

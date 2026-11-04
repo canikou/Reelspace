@@ -443,3 +443,8 @@ input, textarea, select { background: var(--input); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+.recorder-panel { grid-column: 1 / -1; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); align-items: start; }
+.recorder-panel > h2, .recorder-panel > h3, .recorder-panel > .data-status, .recorder-panel > .muted, .recorder-actions, .recorder-panel > .primary-button { grid-column: 1 / -1; }
+.recorder-panel > h3 { margin: 6px 0 0; font-size: var(--text-sm); }
+.recorder-panel > .primary-button { justify-self: start; }
+.recorder-actions { display: flex; flex-wrap: wrap; gap: 8px; }
