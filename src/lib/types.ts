@@ -41,6 +41,15 @@ export interface AppSettings {
   clipFolder?: string | null;
   storageLimitBytes?: number | null;
   cleanupThresholdPercent: number;
+  theme?: "system" | "dark" | "light";
+  automaticallyCheckUpdates?: boolean;
+  automaticallyDownloadUpdates?: boolean;
+  includePrereleaseUpdates?: boolean;
+  preferredRecordingApp?: string | null;
+  automaticallyArchiveRecordings?: boolean;
+  automaticallyArchiveClips?: boolean;
+  keepLocalClips?: boolean;
+  pauseUploadsWhileRecording?: boolean;
 }
 
 export interface ToolHealth {
@@ -65,6 +74,7 @@ export interface AppSnapshot {
   settings: AppSettings;
   ffmpeg: ToolHealth;
   stats: StorageStats;
+  activeMediaWork?: boolean;
 }
 
 export interface MediaItem {
@@ -85,13 +95,63 @@ export interface MediaItem {
   modifiedAt: number;
   trimStartSeconds?: number | null;
   trimEndSeconds?: number | null;
+  gameId?: string | null;
+  gameName?: string | null;
+  keepLocal?: boolean;
+  availability?: "localOnly" | "queued" | "preparing" | "uploading" | "waitingForQuota" | "processingRemote" | "archivedVerified" | "remoteOnly" | "uploadFailed" | "remoteMissing" | "multipleRemoteCopies";
+  remoteCopyCount?: number;
+  primaryRemoteUrl?: string | null;
 }
 
 export interface Collection {
   id: string;
   name: string;
   itemCount: number;
+  storageDefault: "keepLocal" | "archive" | null;
 }
+
+export interface Game {
+  id: string;
+  name: string;
+  color: string;
+  mediaCount: number;
+  aliases: string[];
+}
+
+export interface GameAssignment {
+  mediaId: string;
+  gameId: string;
+  gameName: string;
+  color: string;
+}
+
+export interface ArchiveStatus {
+  mediaId: string;
+  state: NonNullable<MediaItem["availability"]>;
+  keepLocal: boolean;
+  remoteCopyCount: number;
+  primaryRemoteUrl?: string | null;
+  progressPercent: number;
+  error?: string | null;
+}
+export interface ArchiveAccount { provider: string; accountId: string; displayName: string; connectedAt: number }
+
+export interface UploadJob {
+  id: string;
+  mediaId: string;
+  filename: string;
+  state: string;
+  priority: number;
+  bytesUploaded: number;
+  totalBytes: number;
+  attempts: number;
+  error?: string | null;
+  updatedAt: number;
+}
+
+export interface MediaEvent { event: string; detail?: string | null; createdAt: number }
+export interface RecorderApp { id: string; name: string; executablePath: string }
+export interface RepairSummary { missingLocalFiles: number; preservedRemoteOnlyItems: number; thumbnailsQueued: number; staleJobsRecovered: number }
 
 export interface LibraryDataExportSummary {
   items: number;

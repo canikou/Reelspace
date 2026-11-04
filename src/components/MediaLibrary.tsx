@@ -1,8 +1,8 @@
-import { Grid2X2, List, Search, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { MediaItem } from "../lib/types";
 import { MediaGrid } from "./MediaGrid";
 import type { MediaActions } from "./MediaCard";
+import { AppIcon } from "./icons";
 
 type SortKey = "latest" | "oldest" | "largest" | "longest";
 type ViewMode = "grid" | "list";
@@ -49,7 +49,7 @@ export function MediaLibrary({
     <div className="library-stack">
       <div className="library-toolbar">
         <label className="search-control">
-          <Search size={16} />
+          <AppIcon name="search" size={16} />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -57,12 +57,12 @@ export function MediaLibrary({
             aria-label="Search media"
           />
           {query ? (
-            <button onClick={() => setQuery("")} aria-label="Clear search" title="Clear search"><X size={15} /></button>
+            <button onClick={() => setQuery("")} aria-label="Clear search" title="Clear search"><AppIcon name="close" size={15} /></button>
           ) : null}
         </label>
         <div className="toolbar-meta"><strong>{visible.length}</strong><span>/ {items.length}</span></div>
         <label className="sort-control">
-          <SlidersHorizontal size={16} />
+          <AppIcon name="filter" size={16} />
           <select value={sort} onChange={(event) => setSort(event.target.value as SortKey)} aria-label="Sort media">
             <option value="latest">Latest</option>
             <option value="oldest">Oldest</option>
@@ -71,8 +71,8 @@ export function MediaLibrary({
           </select>
         </label>
         <div className="view-toggle" aria-label="View density">
-          <button className={view === "grid" ? "active" : ""} onClick={() => setView("grid")} aria-label="Grid view" title="Grid view"><Grid2X2 size={16} /></button>
-          <button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-label="List view" title="List view"><List size={17} /></button>
+          <button className={view === "grid" ? "active" : ""} onClick={() => setView("grid")} aria-label="Grid view" title="Grid view"><AppIcon name="grid" size={16} /></button>
+          <button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-label="List view" title="List view"><AppIcon name="list" size={17} /></button>
         </div>
       </div>
       <MediaGrid items={rendered} actions={actions} empty={query ? "No media matches this search." : empty} view={view} highlightedId={highlightedId} />

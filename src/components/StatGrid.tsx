@@ -1,22 +1,21 @@
-import { HardDrive, Scissors, Video, WalletCards } from "lucide-react";
 import { formatBytes, percent } from "../lib/format";
 import type { StorageStats } from "../lib/types";
+import { AppIcon, type IconName } from "./icons";
 
 export function StatGrid({ stats, rawCount, clipCount }: { stats: StorageStats; rawCount: number; clipCount: number }) {
   const cards = [
-    { label: "Drive Free", value: formatBytes(stats.driveAvailableBytes), detail: "available", icon: HardDrive, tone: "info" },
-    { label: "Raw Files", value: formatBytes(stats.rawBytes), detail: `${rawCount} files`, icon: Video, tone: "raw" },
-    { label: "Clips", value: formatBytes(stats.clipBytes), detail: `${clipCount} clips`, icon: Scissors, tone: "clip" },
-    { label: "Managed", value: formatBytes(stats.managedBytes), detail: `${rawCount + clipCount} total`, icon: WalletCards, tone: "accent" }
+    { label: "Drive Free", value: formatBytes(stats.driveAvailableBytes), detail: "available", icon: "local" as IconName, tone: "info" },
+    { label: "Recordings", value: formatBytes(stats.rawBytes), detail: `${rawCount} files`, icon: "recording" as IconName, tone: "raw" },
+    { label: "Clips", value: formatBytes(stats.clipBytes), detail: `${clipCount} clips`, icon: "clip" as IconName, tone: "clip" },
+    { label: "Managed", value: formatBytes(stats.managedBytes), detail: `${rawCount + clipCount} total`, icon: "library" as IconName, tone: "accent" }
   ];
 
   return (
     <section className="stat-grid">
       {cards.map((card) => {
-        const Icon = card.icon;
         return (
           <article className={`stat-card ${card.tone}`} key={card.label}>
-            <div className="stat-icon"><Icon size={19} /></div>
+            <div className="stat-icon"><AppIcon name={card.icon} size={19} /></div>
             <span>{card.label}</span>
             <strong>{card.value}</strong>
             <small>{card.detail}</small>

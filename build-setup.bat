@@ -26,6 +26,8 @@ echo.
 if "%RUN_EXIT%"=="0" (
   echo Setup generated successfully.
   echo Setup: %CD%\dist\setup.exe
+  echo Sig:   %CD%\dist\setup.exe.sig
+  echo SHA:   %CD%\dist\setup.exe.sha256
 ) else (
   echo Setup generation failed with exit code %RUN_EXIT%.
 )

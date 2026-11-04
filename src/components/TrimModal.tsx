@@ -1,8 +1,8 @@
-import { Check, ChevronLeft, ChevronRight, LoaderCircle, Save, Volume2, VolumeX, X } from "lucide-react";
 import { type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, mediaSrc } from "../lib/api";
 import { formatDuration } from "../lib/format";
 import type { AudioTrack, MediaItem } from "../lib/types";
+import { AppIcon } from "./icons";
 
 type ActivePoint = "start" | "end";
 type PreviewPhase = "queued" | "preparing" | "ready" | "error";
@@ -164,6 +164,11 @@ export function TrimModal({
   }, [item.id]);
 
   useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    return () => previous?.focus();
+  }, []);
+
+  useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape" && !busy) onClose();
     }
@@ -309,7 +314,7 @@ export function TrimModal({
             <h2 id="trim-title">Trim</h2>
             <p>{item.filename}</p>
           </div>
-          <button title="Close" aria-label="Close" onClick={onClose} disabled={busy}><X size={18} /></button>
+          <button title="Close" aria-label="Close" onClick={onClose} disabled={busy}><AppIcon name="close" size={18} /></button>
         </header>
         <video
           ref={videoRef}
@@ -366,7 +371,7 @@ export function TrimModal({
         <div className="trim-panel">
           <label className="trim-title-field">
             Clip title
-            <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Optional" />
+            <input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Optional" />
           </label>
 
           <div className="range-readout">
@@ -383,7 +388,7 @@ export function TrimModal({
             className="trim-timeline"
             onMouseDown={setTimelinePoint}
             onContextMenu={(event) => event.preventDefault()}
-            title="Left click sets IN. Right click sets OUT."
+            title="Left click sets IN. Right click sets OUT. Focus a handle and use arrow keys (Shift for 1 s)."
           >
             <div className="trim-selection" style={{ left: `${(start / duration) * 100}%`, width: `${(span / duration) * 100}%` }} />
             <div className="trim-playhead" style={{ left: `${(playhead / duration) * 100}%` }} />
@@ -424,24 +429,24 @@ export function TrimModal({
           </div>
 
           <div className="nudge-controls">
-            <button onClick={(event) => nudge(-1, event.shiftKey)} title="Nudge left; hold Shift for 1 second" aria-label={`Nudge ${activePoint} left`}><ChevronLeft size={17} /></button>
+            <button onClick={(event) => nudge(-1, event.shiftKey)} title="Nudge left; hold Shift for 1 second" aria-label={`Nudge ${activePoint} left`}><AppIcon name="nudgeLeft" size={17} /></button>
             <span>{activePoint === "start" ? "IN" : "OUT"} · {formatDuration(activePoint === "start" ? start : end)}</span>
-            <button onClick={(event) => nudge(1, event.shiftKey)} title="Nudge right; hold Shift for 1 second" aria-label={`Nudge ${activePoint} right`}><ChevronRight size={17} /></button>
+            <button onClick={(event) => nudge(1, event.shiftKey)} title="Nudge right; hold Shift for 1 second" aria-label={`Nudge ${activePoint} right`}><AppIcon name="nudgeRight" size={17} /></button>
           </div>
 
           {tracks.length ? (
             <section className="track-controls" aria-label="Audio tracks">
               <div className="track-heading">
-                <div><Volume2 size={15} /><span>Audio tracks</span></div>
+                <div><AppIcon name="volume" size={15} /><span>Audio tracks</span></div>
                 <div className="track-heading-actions">
                   <span className={readyPreviewCount === tracks.length ? "track-progress ready" : "track-progress"} aria-live="polite">
-                    {readyPreviewCount === tracks.length ? <Check size={13} /> : <LoaderCircle size={13} className="spin" />}
+                    {readyPreviewCount === tracks.length ? <AppIcon name="check" size={13} /> : <AppIcon name="preparing" size={13} className="spin" />}
                     {readyPreviewCount}/{tracks.length}
                   </span>
                   {proxiesActive ? (
                     <div className="proxy-volume">
                       <button onClick={() => setPreviewMuted((current) => !current)} aria-label={previewMuted ? "Unmute track preview" : "Mute track preview"} aria-pressed={previewMuted}>
-                        {previewMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                        {previewMuted ? <AppIcon name="volumeOff" size={14} /> : <AppIcon name="volume" size={14} />}
                       </button>
                       <input aria-label="Track preview volume" type="range" min="0" max="1" step="0.05" value={previewVolume} onChange={(event) => setPreviewVolume(Number(event.target.value))} />
                     </div>
@@ -459,11 +464,11 @@ export function TrimModal({
                   const details = [track.codec?.toUpperCase(), track.channels ? `${track.channels}ch` : null].filter(Boolean).join(" · ");
                   return (
                     <button key={track.index} className={`${enabled ? "enabled" : ""} status-${status}`} onClick={() => toggleTrack(track.index)} aria-pressed={enabled}>
-                      {enabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
+                      {enabled ? <AppIcon name="volume" size={15} /> : <AppIcon name="volumeOff" size={15} />}
                       <span>{track.title || `Track ${position + 1}`}</span>
                       <small>
-                        {status === "preparing" ? <LoaderCircle size={11} className="spin" /> : null}
-                        {status === "ready" ? <Check size={11} /> : null}
+                        {status === "preparing" ? <AppIcon name="preparing" size={11} className="spin" /> : null}
+                        {status === "ready" ? <AppIcon name="check" size={11} /> : null}
                         {status === "error" ? "Unavailable" : status === "queued" ? "Queued" : status === "preparing" ? "Preparing" : `${method === "cache" ? "Cached" : method === "copy" ? "Copied" : "Ready"}${details ? ` · ${details}` : ""}`}
                       </small>
                     </button>
@@ -481,7 +486,7 @@ export function TrimModal({
           {error ? <div className="inline-error" role="alert">{error}</div> : null}
           <div className="trim-actions">
             <button className="primary-button" onClick={saveClip} disabled={busy || tracksLoading || Boolean(trackError) || span < MIN_SPAN} title="Save clip">
-              <Save size={17} /> {busy ? "Saving" : tracksLoading ? "Loading tracks" : "Save Clip"}
+              <AppIcon name="clip" size={17} /> {busy ? "Saving" : tracksLoading ? "Loading tracks" : "Create Clip"}
             </button>
           </div>
         </div>

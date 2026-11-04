@@ -4,12 +4,12 @@ param()
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$archiveName = "ffmpeg-N-125628-ga5e6c0175a-win64-gpl.zip"
-$archiveUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-15-14-01/$archiveName"
-$archiveSha256 = "1c7a6a3d7126e85c6148c42e83bdfb6f964c4a04453075323828a52b331ca149"
+$archiveName = "ffmpeg-n8.1.3-32-g760d10603e-win64-gpl-8.1.zip"
+$archiveUrl = "https://github.com/canikou/Reelspace/releases/download/vendor-ffmpeg-n8.1.3/$archiveName"
+$archiveSha256 = "f41877437ec23e4619e5507180a020005738fe09376fdfcd3fdc0f4c549afc7c"
 $toolHashes = @{
-  "ffmpeg.exe" = "87d2e2adfd15e8f134f5afcd4c5f0b1982e41bc9b28b9b790aa00532506aa855"
-  "ffprobe.exe" = "353945bafa10aec047ced391f4a9fecc5934c2c15a9471fdcd98f5f2caa30bdf"
+  "ffmpeg.exe" = "e49f39b5720de3edf15d63a76e4d6e8d04c0c2e641b0ca118360ee4c4bd52e36"
+  "ffprobe.exe" = "8a2e6a26236f154d093eebe98251c52adaf047de2d6c73478da5e4df8c48ce7b"
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot

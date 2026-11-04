@@ -13,6 +13,7 @@ $ErrorActionPreference = "Stop"
 $startedAt = Get-Date
 $transcribing = $false
 $exitCode = 1
+$signingEnvironmentLoadedByRunner = $false
 $runnerRevision = (Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash.Substring(0, 12).ToLowerInvariant()
 
 function Write-Stage {
@@ -38,7 +39,10 @@ function Invoke-RunnerCommand {
   try {
     $ErrorActionPreference = "Continue"
     & $FilePath @Arguments 2>&1 | ForEach-Object {
-      Write-Host ([string]$_)
+      $line = [string]$_
+      if ($line -ne "System.Management.Automation.RemoteException") {
+        Write-Host $line
+      }
     }
     $commandExitCode = $LASTEXITCODE
   } finally {
@@ -114,6 +118,53 @@ function Add-ToolPath {
     })
     $env:Path = (@($Path) + $remaining) -join ";"
   }
+}
+
+function Import-UpdaterSigningEnvironment {
+  $hasPrivateKey = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
+  $hasPassword = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
+  if ($hasPrivateKey -or $hasPassword) {
+    if (-not ($hasPrivateKey -and $hasPassword)) {
+      throw "Updater signing requires both TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD."
+    }
+    Write-Host "Updater signing: using the caller-provided environment." -ForegroundColor Green
+    return
+  }
+
+  $tauriDirectory = Join-Path $env:USERPROFILE ".tauri"
+  $keyPath = Join-Path $tauriDirectory "reelspace-updater-v3.key"
+  $passwordPath = Join-Path $tauriDirectory "reelspace-updater-v3.password.dpapi"
+  if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
+    throw "The local updater signing key is missing: $keyPath"
+  }
+  if (-not (Test-Path -LiteralPath $passwordPath -PathType Leaf)) {
+    throw "The DPAPI-protected updater signing password is missing: $passwordPath"
+  }
+
+  $securePassword = $null
+  [IntPtr]$passwordPointer = [IntPtr]::Zero
+  try {
+    $protectedPassword = (Get-Content -LiteralPath $passwordPath -Raw).Trim()
+    $securePassword = $protectedPassword | ConvertTo-SecureString
+    $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+    $password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
+    if ([string]::IsNullOrWhiteSpace($password)) {
+      throw "The local updater signing password could not be decrypted."
+    }
+    $env:TAURI_SIGNING_PRIVATE_KEY = $keyPath
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $password
+    $script:signingEnvironmentLoadedByRunner = $true
+  } finally {
+    if ($passwordPointer -ne [IntPtr]::Zero) {
+      [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+    }
+    if ($securePassword) {
+      $securePassword.Dispose()
+    }
+    $protectedPassword = $null
+    $password = $null
+  }
+  Write-Host "Updater signing: loaded the DPAPI-protected local v3 key." -ForegroundColor Green
 }
 
 function Get-DependencyFingerprint {
@@ -220,9 +271,20 @@ function Copy-InstallerArtifacts {
   Copy-Item -LiteralPath $installers[0].FullName -Destination $setupPath -Force
   Assert-WindowsExecutable -Path $setupPath
 
+  $signatureSource = "$($installers[0].FullName).sig"
+  if (-not (Test-Path -LiteralPath $signatureSource -PathType Leaf)) {
+    throw "The NSIS installer was built, but its updater signature is missing: $signatureSource"
+  }
+  $signaturePath = Join-Path $outputDir "setup.exe.sig"
+  Copy-Item -LiteralPath $signatureSource -Destination $signaturePath -Force
+
   $setupFile = Get-Item -LiteralPath $setupPath
   $setupHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setupPath).Hash
+  $checksumPath = Join-Path $outputDir "setup.exe.sha256"
+  "$($setupHash.ToLowerInvariant())  setup.exe" | Set-Content -LiteralPath $checksumPath -Encoding ASCII
   Write-Host "Setup:  $setupPath" -ForegroundColor Green
+  Write-Host "Sig:    $signaturePath" -ForegroundColor Green
+  Write-Host "SHA:    $checksumPath" -ForegroundColor Green
   Write-Host ("Size:   {0:N1} MB" -f ($setupFile.Length / 1MB)) -ForegroundColor Green
   Write-Host "SHA256: $setupHash" -ForegroundColor Green
 }
@@ -329,6 +391,7 @@ try {
       Assert-PackagingResources
       Write-Stage "Building the optimized app and NSIS installer"
       Write-Host "Release builds are intentionally slower; incremental artifacts are retained for the next build."
+      Import-UpdaterSigningEnvironment
       Invoke-RunnerCommand -FilePath $pnpmCommand.Source -Arguments @("run", "tauri:build")
       Write-Stage "Collecting setup files in dist"
       Copy-InstallerArtifacts
@@ -361,6 +424,10 @@ try {
   Write-Host "Full log: $LogPath" -ForegroundColor Yellow
   $exitCode = 1
 } finally {
+  if ($signingEnvironmentLoadedByRunner) {
+    Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+  }
   if ($transcribing) {
     Stop-Transcript | Out-Null
   }

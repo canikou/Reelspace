@@ -458,6 +458,13 @@ fn is_video_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Separator used inside keys produced by [`normalized_path_key`].
+pub const PATH_KEY_SEPARATOR: char = if cfg!(windows) { '\\' } else { '/' };
+
+/// Identity key for a path. Windows filesystems are case-insensitive, so keys
+/// fold case and separators there; Unix keys keep case because `a.mp4` and
+/// `A.mp4` are different files.
+#[cfg(windows)]
 pub fn normalized_path_key(path: &Path) -> String {
     let mut key = path.to_string_lossy().replace('/', "\\").to_lowercase();
     if let Some(rest) = key.strip_prefix("\\\\?\\unc\\") {
@@ -468,12 +475,24 @@ pub fn normalized_path_key(path: &Path) -> String {
     key.trim_end_matches('\\').to_string()
 }
 
+#[cfg(not(windows))]
+pub fn normalized_path_key(path: &Path) -> String {
+    path.to_string_lossy().trim_end_matches('/').to_string()
+}
+
+/// True when `key` equals `root_key` or lies beneath it (both from [`normalized_path_key`]).
+pub fn path_key_is_within(key: &str, root_key: &str) -> bool {
+    key == root_key
+        || key
+            .strip_prefix(root_key)
+            .is_some_and(|rest| rest.starts_with(PATH_KEY_SEPARATOR))
+}
+
 fn is_excluded(path: &Path, excluded_roots: &[PathBuf]) -> bool {
     let key = normalized_path_key(path);
-    excluded_roots.iter().any(|root| {
-        let root_key = normalized_path_key(root);
-        key == root_key || key.starts_with(&format!("{root_key}\\"))
-    })
+    excluded_roots
+        .iter()
+        .any(|root| path_key_is_within(&key, &normalized_path_key(root)))
 }
 
 fn file_is_unchanged(path: &Path, item: &MediaItem) -> bool {
@@ -608,6 +627,7 @@ mod tests {
         assert_eq!(sanitize_filename("bad/name\0"), "bad_name_");
     }
 
+    #[cfg(windows)]
     #[test]
     fn normalized_windows_paths_collapse_verbatim_drive_and_unc_prefixes() {
         assert_eq!(

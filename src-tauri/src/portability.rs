@@ -1,4 +1,7 @@
-use crate::db::{Database, PortableCollectionUpdate, PortableMediaUpdate};
+use crate::db::{
+    Database, PortableCollectionUpdate, PortableGameUpdate, PortableImportBatch,
+    PortableMediaFeatureUpdate, PortableMediaUpdate, PortableRemoteAssetUpdate,
+};
 use crate::error::{user_error, AppError, AppResult};
 use crate::media::normalized_path_key;
 use crate::models::{
@@ -13,7 +16,8 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 const ARCHIVE_FORMAT: &str = "reelspace-library-data";
-const ARCHIVE_VERSION: u32 = 1;
+const ARCHIVE_VERSION: u32 = 2;
+const MIN_ARCHIVE_VERSION: u32 = 1;
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 250_000;
 const MAX_COLLECTIONS: usize = 50_000;
@@ -28,6 +32,8 @@ struct LibraryArchive {
     exported_at: i64,
     items: Vec<ArchiveItem>,
     collections: Vec<ArchiveCollection>,
+    #[serde(default)]
+    games: Vec<ArchiveGame>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +57,34 @@ struct ArchiveItem {
     modified_at: i64,
     trim_start_seconds: Option<f64>,
     trim_end_seconds: Option<f64>,
+    #[serde(default)]
+    game_id: Option<String>,
+    #[serde(default)]
+    keep_local: Option<bool>,
+    #[serde(default)]
+    remote_assets: Vec<ArchiveRemoteAsset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ArchiveGame {
+    archive_id: String,
+    name: String,
+    color: String,
+    aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ArchiveRemoteAsset {
+    provider: String,
+    provider_remote_id: String,
+    browser_url: Option<String>,
+    privacy_status: Option<String>,
+    verification_status: String,
+    processing_status: String,
+    verified_at: Option<i64>,
+    last_checked_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +93,40 @@ struct ArchiveCollection {
     archive_id: String,
     name: String,
     member_ids: Vec<String>,
+    #[serde(default)]
+    storage_default: Option<String>,
+}
+
+fn portable_remote_assets(
+    database: &Database,
+) -> AppResult<HashMap<String, Vec<ArchiveRemoteAsset>>> {
+    let conn = database.conn()?;
+    let mut statement = conn.prepare(
+        "SELECT media_id, provider, provider_remote_id, browser_url, privacy_status,
+                verification_status, processing_status, verified_at, last_checked_at
+         FROM remote_assets ORDER BY media_id, provider, provider_remote_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            ArchiveRemoteAsset {
+                provider: row.get(1)?,
+                provider_remote_id: row.get(2)?,
+                browser_url: row.get(3)?,
+                privacy_status: row.get(4)?,
+                verification_status: row.get(5)?,
+                processing_status: row.get(6)?,
+                verified_at: row.get(7)?,
+                last_checked_at: row.get(8)?,
+            },
+        ))
+    })?;
+    let mut assets = HashMap::<String, Vec<ArchiveRemoteAsset>>::new();
+    for row in rows {
+        let (media_id, asset) = row?;
+        assets.entry(media_id).or_default().push(asset);
+    }
+    Ok(assets)
 }
 
 pub fn export_library_data(
@@ -79,6 +147,18 @@ pub fn export_library_data(
     if collections.len() > MAX_COLLECTIONS {
         return Err(user_error("there are too many collections to export"));
     }
+    let games = database.list_games()?;
+    let game_assignments = database
+        .list_game_assignments()?
+        .into_iter()
+        .map(|assignment| (assignment.media_id, assignment.game_id))
+        .collect::<HashMap<_, _>>();
+    let keep_local = database
+        .list_archive_statuses()?
+        .into_iter()
+        .map(|status| (status.media_id, status.keep_local))
+        .collect::<HashMap<_, _>>();
+    let remote_assets = portable_remote_assets(database)?;
     let items = media
         .iter()
         .map(|item| ArchiveItem {
@@ -103,6 +183,9 @@ pub fn export_library_data(
             modified_at: item.modified_at,
             trim_start_seconds: item.trim_start_seconds,
             trim_end_seconds: item.trim_end_seconds,
+            game_id: game_assignments.get(&item.id).cloned(),
+            keep_local: keep_local.get(&item.id).copied(),
+            remote_assets: remote_assets.get(&item.id).cloned().unwrap_or_default(),
         })
         .collect::<Vec<_>>();
     let mut membership_count = 0usize;
@@ -123,6 +206,7 @@ pub fn export_library_data(
             archive_id: collection.id,
             name: collection.name,
             member_ids,
+            storage_default: collection.storage_default,
         });
     }
     let archive = LibraryArchive {
@@ -131,6 +215,15 @@ pub fn export_library_data(
         exported_at: Utc::now().timestamp(),
         items,
         collections: archive_collections,
+        games: games
+            .into_iter()
+            .map(|game| ArchiveGame {
+                archive_id: game.id,
+                name: game.name,
+                color: game.color,
+                aliases: game.aliases,
+            })
+            .collect(),
     };
     let mut writer = BoundedWriter::new(MAX_ARCHIVE_BYTES as usize);
     if let Err(error) = serde_json::to_writer_pretty(&mut writer, &archive) {
@@ -176,6 +269,26 @@ pub fn import_library_data(
     validate_archive(&archive)?;
 
     let roots = reference_roots(settings, data_dir);
+    let existing_games = database.list_games()?;
+    let mut game_ids = HashMap::<String, String>::new();
+    let games = archive
+        .games
+        .iter()
+        .map(|game| {
+            let local_id = existing_games
+                .iter()
+                .find(|existing| existing.name.eq_ignore_ascii_case(&game.name))
+                .map(|existing| existing.id.clone())
+                .unwrap_or_else(|| stable_id(&format!("game:{}", game.name.trim().to_lowercase())));
+            game_ids.insert(game.archive_id.clone(), local_id.clone());
+            PortableGameUpdate {
+                id: local_id,
+                name: game.name.clone(),
+                color: game.color.clone(),
+                aliases: game.aliases.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
     let current = database.list_media(None)?;
     let by_path = current
         .iter()
@@ -217,7 +330,15 @@ pub fn import_library_data(
             }
             continue;
         }
-        if let Some(path) = resolve_existing_media_path(archived, &roots) {
+        let resolved_local_path = resolve_existing_media_path(archived, &roots);
+        let path = resolved_local_path.clone().or_else(|| {
+            archived
+                .remote_assets
+                .iter()
+                .any(|asset| asset.verification_status == "verified")
+                .then(|| remote_only_placeholder(data_dir, archived))
+        });
+        if let Some(path) = path {
             let path_string = path.to_string_lossy().to_string();
             let id = stable_id(&path_string);
             if by_path.contains_key(&normalized_path_key(&path))
@@ -230,7 +351,9 @@ pub fn import_library_data(
                 id,
                 kind: archived.kind,
                 path: path_string,
-                source_path: resolve_source_path(archived, &roots),
+                source_path: resolved_local_path
+                    .as_ref()
+                    .and_then(|_| resolve_source_path(archived, &roots)),
                 filename: path
                     .file_name()
                     .and_then(|value| value.to_str())
@@ -275,12 +398,61 @@ pub fn import_library_data(
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect(),
+            storage_default: collection.storage_default.clone(),
+        })
+        .collect::<Vec<_>>();
+    let media_features = archive
+        .items
+        .iter()
+        .filter_map(|item| {
+            imported_ids
+                .get(&item.archive_id)
+                .map(|media_id| PortableMediaFeatureUpdate {
+                    media_id: media_id.clone(),
+                    game_id: item
+                        .game_id
+                        .as_ref()
+                        .and_then(|archive_game_id| game_ids.get(archive_game_id))
+                        .cloned(),
+                    keep_local: item.keep_local,
+                })
+        })
+        .collect::<Vec<_>>();
+    let remote_assets = archive
+        .items
+        .iter()
+        .filter_map(|item| {
+            imported_ids
+                .get(&item.archive_id)
+                .map(|media_id| (media_id, &item.remote_assets))
+        })
+        .flat_map(|(media_id, assets)| {
+            assets.iter().map(move |asset| PortableRemoteAssetUpdate {
+                id: stable_id(&format!(
+                    "remote:{}:{}",
+                    asset.provider, asset.provider_remote_id
+                )),
+                media_id: media_id.clone(),
+                provider: asset.provider.clone(),
+                provider_remote_id: asset.provider_remote_id.clone(),
+                browser_url: asset.browser_url.clone(),
+                privacy_status: asset.privacy_status.clone(),
+                verification_status: asset.verification_status.clone(),
+                processing_status: asset.processing_status.clone(),
+                verified_at: asset.verified_at,
+                last_checked_at: asset.last_checked_at,
+            })
         })
         .collect::<Vec<_>>();
     let changes = database.apply_portable_import(
-        &restored_items,
-        &updates,
-        &collections,
+        PortableImportBatch {
+            restored_items: &restored_items,
+            media_updates: &updates,
+            collections: &collections,
+            games: &games,
+            media_features: &media_features,
+            remote_assets: &remote_assets,
+        },
         Utc::now().timestamp(),
     )?;
     Ok(LibraryDataImportSummary {
@@ -301,7 +473,7 @@ fn validate_archive(archive: &LibraryArchive) -> AppResult<()> {
             "the selected file is not a Reelspace data archive",
         ));
     }
-    if archive.version != ARCHIVE_VERSION {
+    if !(MIN_ARCHIVE_VERSION..=ARCHIVE_VERSION).contains(&archive.version) {
         return Err(user_error(format!(
             "Reelspace data archive version {} is not supported",
             archive.version
@@ -315,8 +487,60 @@ fn validate_archive(archive: &LibraryArchive) -> AppResult<()> {
     if archive.collections.len() > MAX_COLLECTIONS {
         return Err(user_error("the data archive contains too many collections"));
     }
+    if archive.games.len() > MAX_COLLECTIONS {
+        return Err(user_error("the data archive contains too many games"));
+    }
+    let mut game_ids = HashSet::with_capacity(archive.games.len());
+    let mut game_names = HashSet::with_capacity(archive.games.len());
+    for game in &archive.games {
+        validate_id(&game.archive_id, "game")?;
+        if !game_ids.insert(game.archive_id.as_str()) {
+            return Err(user_error(
+                "the data archive contains duplicate game identifiers",
+            ));
+        }
+        let name = game.name.trim();
+        let normalized_name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if name.is_empty()
+            || name != game.name
+            || normalized_name != name
+            || name.chars().count() > 120
+            || contains_forbidden_control(name, false)
+            || !game_names.insert(name.to_lowercase())
+        {
+            return Err(user_error("an imported game name is invalid or duplicated"));
+        }
+        if game.color.len() != 7
+            || !game.color.starts_with('#')
+            || !game.color[1..]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(user_error("an imported game color is invalid"));
+        }
+        if game.aliases.len() > 1_000 {
+            return Err(user_error("an imported game has too many aliases"));
+        }
+        let mut aliases = HashSet::with_capacity(game.aliases.len());
+        for original_alias in &game.aliases {
+            let alias = original_alias.trim();
+            let normalized_alias = alias.split_whitespace().collect::<Vec<_>>().join(" ");
+            if alias.is_empty()
+                || alias != original_alias
+                || normalized_alias != alias
+                || alias.chars().count() > 120
+                || contains_forbidden_control(alias, false)
+                || !aliases.insert(alias.to_lowercase())
+            {
+                return Err(user_error(
+                    "an imported game alias is invalid or duplicated",
+                ));
+            }
+        }
+    }
     let mut ids = HashSet::with_capacity(archive.items.len());
     let mut original_paths = HashSet::with_capacity(archive.items.len());
+    let mut remote_ids = HashSet::new();
     for item in &archive.items {
         validate_id(&item.archive_id, "media")?;
         if !ids.insert(item.archive_id.as_str()) {
@@ -330,6 +554,22 @@ fn validate_archive(archive: &LibraryArchive) -> AppResult<()> {
             ));
         }
         validate_item(item)?;
+        for asset in &item.remote_assets {
+            if !remote_ids.insert((asset.provider.as_str(), asset.provider_remote_id.as_str())) {
+                return Err(user_error(
+                    "the data archive contains duplicate remote references",
+                ));
+            }
+        }
+        if item
+            .game_id
+            .as_ref()
+            .is_some_and(|game_id| !game_ids.contains(game_id.as_str()))
+        {
+            return Err(user_error(
+                "a media item references a game missing from the data archive",
+            ));
+        }
     }
     let mut collection_ids = HashSet::with_capacity(archive.collections.len());
     let mut collection_names = HashSet::with_capacity(archive.collections.len());
@@ -348,6 +588,14 @@ fn validate_archive(archive: &LibraryArchive) -> AppResult<()> {
         if !collection_names.insert(name.to_lowercase()) {
             return Err(user_error(
                 "the data archive contains duplicate collection names",
+            ));
+        }
+        if !matches!(
+            collection.storage_default.as_deref(),
+            None | Some("keepLocal") | Some("archive")
+        ) {
+            return Err(user_error(
+                "an imported collection storage default is invalid",
             ));
         }
         memberships = memberships.saturating_add(collection.member_ids.len());
@@ -428,6 +676,34 @@ fn validate_item(item: &ArchiveItem) -> AppResult<()> {
         return Err(user_error("imported media notes are not normalized"));
     }
     validate_trim(item)?;
+    let mut remote_ids = HashSet::with_capacity(item.remote_assets.len());
+    for asset in &item.remote_assets {
+        if asset.provider != "youtube"
+            || asset.provider_remote_id.is_empty()
+            || asset.provider_remote_id.len() > 256
+            || contains_forbidden_control(&asset.provider_remote_id, false)
+            || !remote_ids.insert((&asset.provider, &asset.provider_remote_id))
+            || asset.privacy_status.as_deref() != Some("private")
+            || asset.verification_status != "verified"
+            || asset.processing_status != "processed"
+        {
+            return Err(user_error(
+                "an imported remote archive reference is invalid",
+            ));
+        }
+        if let Some(browser_url) = &asset.browser_url {
+            let parsed = url::Url::parse(browser_url)
+                .map_err(|_| user_error("an imported remote archive URL is invalid"))?;
+            let allowed_host = parsed.host_str().is_some_and(|host| {
+                host.eq_ignore_ascii_case("youtu.be")
+                    || host.eq_ignore_ascii_case("youtube.com")
+                    || host.eq_ignore_ascii_case("www.youtube.com")
+            });
+            if parsed.scheme() != "https" || !allowed_host {
+                return Err(user_error("an imported remote archive URL is invalid"));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -510,6 +786,13 @@ fn resolve_existing_media_path(archived: &ArchiveItem, roots: &[PathBuf]) -> Opt
     }
 }
 
+fn remote_only_placeholder(data_dir: &Path, archived: &ArchiveItem) -> PathBuf {
+    data_dir
+        .join("remote-only")
+        .join(&archived.archive_id)
+        .join(&archived.filename)
+}
+
 fn resolve_source_path(archived: &ArchiveItem, roots: &[PathBuf]) -> Option<String> {
     let mut paths = archived
         .original_source_path
@@ -554,7 +837,8 @@ fn relative_to_roots(path: &Path, roots: &[PathBuf]) -> Option<String> {
     roots.iter().find_map(|root| {
         let root_key = normalized_path_key(root);
         path_key
-            .strip_prefix(&format!("{root_key}\\"))
+            .strip_prefix(&root_key)
+            .and_then(|rest| rest.strip_prefix(crate::media::PATH_KEY_SEPARATOR))
             .filter(|relative| !relative.is_empty())
             .map(str::to_string)
     })
@@ -562,10 +846,9 @@ fn relative_to_roots(path: &Path, roots: &[PathBuf]) -> Option<String> {
 
 fn path_is_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
     let path_key = normalized_path_key(path);
-    roots.iter().any(|root| {
-        let root_key = normalized_path_key(root);
-        path_key == root_key || path_key.starts_with(&format!("{root_key}\\"))
-    })
+    roots
+        .iter()
+        .any(|root| crate::media::path_key_is_within(&path_key, &normalized_path_key(root)))
 }
 
 fn merge_tags(existing: &[String], imported: &[String]) -> AppResult<(Vec<String>, bool)> {
@@ -650,24 +933,43 @@ fn validate_id(id: &str, kind: &str) -> AppResult<()> {
 
 fn validate_path_text(path: &str, label: &str) -> AppResult<()> {
     let lower = path.to_ascii_lowercase();
-    let invalid_component = Path::new(path)
-        .components()
-        .any(|component| match component {
-            Component::CurDir | Component::ParentDir => true,
-            Component::Normal(value) => value.to_string_lossy().contains(':'),
-            _ => false,
-        });
+    // Archives can come from another OS (e.g. a Windows `C:\\` path imported on
+    // Linux). Such paths never resolve locally; they are kept only as lookup keys.
+    let foreign = !Path::new(path).is_absolute() && is_foreign_absolute(path);
+    let invalid_component = if foreign {
+        path.split(['/', '\\'])
+            .skip(1)
+            .any(|segment| matches!(segment, "." | "..") || segment.contains(':'))
+    } else {
+        Path::new(path)
+            .components()
+            .any(|component| match component {
+                Component::CurDir | Component::ParentDir => true,
+                Component::Normal(value) => value.to_string_lossy().contains(':'),
+                _ => false,
+            })
+    };
     if path.is_empty()
         || path.len() > MAX_PATH_BYTES
         || contains_forbidden_control(path, false)
         || lower.starts_with("\\\\.\\")
         || lower.starts_with("\\\\?\\globalroot")
         || invalid_component
-        || !Path::new(path).is_absolute()
+        || !(foreign || Path::new(path).is_absolute())
     {
         return Err(user_error(format!("an imported {label} is invalid")));
     }
     Ok(())
+}
+
+/// A Windows drive path (`C:\\…`) or a Unix absolute path (`/…`), regardless of host OS.
+fn is_foreign_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'))
 }
 
 fn validate_relative_path(path: &str) -> AppResult<()> {
@@ -675,6 +977,9 @@ fn validate_relative_path(path: &str) -> AppResult<()> {
         || path.len() > MAX_PATH_BYTES
         || contains_forbidden_control(path, false)
         || path.contains(':')
+        || path
+            .split(['/', '\\'])
+            .any(|segment| matches!(segment, "" | "." | ".."))
         || Path::new(path)
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
@@ -885,6 +1190,9 @@ mod tests {
             modified_at: 2,
             trim_start_seconds: None,
             trim_end_seconds: None,
+            game_id: None,
+            keep_local: None,
+            remote_assets: Vec::new(),
         }
     }
 
@@ -898,7 +1206,9 @@ mod tests {
                 archive_id: "b".repeat(64),
                 name: "Favorites".into(),
                 member_ids: vec!["a".repeat(64)],
+                storage_default: None,
             }],
+            games: Vec::new(),
         }
     }
 
@@ -924,6 +1234,20 @@ mod tests {
         source_db
             .add_to_collection(&"b".repeat(64), &source_item.id, 2)
             .expect("membership");
+        source_db
+            .set_collection_storage_default(&"b".repeat(64), Some("keepLocal"))
+            .expect("collection default");
+        source_db.create_game("Hades").expect("game");
+        let game_id = source_db.list_games().expect("games")[0].id.clone();
+        source_db
+            .assign_game(&source_item.id, &game_id)
+            .expect("classification");
+        source_db
+            .rename_game(&game_id, "Hades II", true)
+            .expect("rename game");
+        source_db
+            .set_keep_local(&source_item.id, true)
+            .expect("keep local");
         let archive_path = directory.join("library-data.json");
         let export = export_library_data(
             &source_db,
@@ -969,9 +1293,24 @@ mod tests {
         let updated = target_db.get_media(&target_item.id).expect("updated");
         assert_eq!(updated.tags, vec!["local", "highlight"]);
         assert_eq!(updated.notes.as_deref(), Some("portable note"));
+        let imported_collection = &target_db.list_collections().expect("collections")[0];
+        assert_eq!(imported_collection.item_count, 1);
         assert_eq!(
-            target_db.list_collections().expect("collections")[0].item_count,
-            1
+            imported_collection.storage_default.as_deref(),
+            Some("keepLocal")
+        );
+        let imported_game = &target_db.list_games().expect("imported games")[0];
+        assert_eq!(imported_game.name, "Hades II");
+        assert!(imported_game.aliases.iter().any(|alias| alias == "Hades"));
+        let assignment = &target_db
+            .list_game_assignments()
+            .expect("imported assignments")[0];
+        assert_eq!(assignment.media_id, target_item.id);
+        assert!(
+            target_db
+                .list_archive_statuses()
+                .expect("imported preferences")[0]
+                .keep_local
         );
 
         target_db
@@ -1057,6 +1396,47 @@ mod tests {
             .list_media(None)
             .expect("no phantom media")
             .is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn verified_remote_only_records_survive_without_copying_video_files() {
+        let directory = fixture("remote-only");
+        let mut archive = archive();
+        archive.collections.clear();
+        archive.items[0].relative_path = None;
+        archive.items[0].remote_assets = vec![ArchiveRemoteAsset {
+            provider: "youtube".into(),
+            provider_remote_id: "private-video-id".into(),
+            browser_url: Some("https://www.youtube.com/watch?v=private-video-id".into()),
+            privacy_status: Some("private".into()),
+            verification_status: "verified".into(),
+            processing_status: "processed".into(),
+            verified_at: Some(10),
+            last_checked_at: 10,
+        }];
+        let archive_path = directory.join("remote-only.json");
+        fs::write(
+            &archive_path,
+            serde_json::to_vec_pretty(&archive).expect("serialize archive"),
+        )
+        .expect("write archive");
+
+        let database = Database::open(directory.join("target.sqlite")).expect("database");
+        let summary = import_library_data(
+            &database,
+            &AppSettings::default(),
+            &directory,
+            &archive_path,
+        )
+        .expect("remote-only import");
+        assert_eq!(summary.restored_items, 1);
+        let media = database.list_media(None).expect("media");
+        assert_eq!(media.len(), 1);
+        assert!(!Path::new(&media[0].path).exists());
+        let status = &database.list_archive_statuses().expect("archive status")[0];
+        assert_eq!(status.state, "remoteOnly");
+        assert_eq!(status.remote_copy_count, 1);
         let _ = fs::remove_dir_all(directory);
     }
 

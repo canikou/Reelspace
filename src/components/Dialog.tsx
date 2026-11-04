@@ -1,5 +1,5 @@
-import { X } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef } from "react";
+import { AppIcon } from "./icons";
 
 export function Dialog({
   title,
@@ -17,19 +17,23 @@ export function Dialog({
   const titleId = useId();
   const descriptionId = useId();
   const panelRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    panelRef.current?.querySelector<HTMLElement>("button, input, textarea, select")?.focus();
+    // Land on the field, else the safe footer action (Cancel), never the header close button.
+    const panel = panelRef.current;
+    (panel?.querySelector<HTMLElement>("input, textarea, select") ?? panel?.querySelector<HTMLElement>(".dialog-actions button, .collection-picker button") ?? panel?.querySelector<HTMLElement>("button"))?.focus();
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseRef.current();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       previous?.focus();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -47,7 +51,7 @@ export function Dialog({
             {description ? <p id={descriptionId}>{description}</p> : null}
           </div>
           <button className="bare-icon" aria-label="Close" title="Close" onClick={onClose}>
-            <X size={18} />
+            <AppIcon name="close" size={18} />
           </button>
         </header>
         {children}

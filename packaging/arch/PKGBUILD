@@ -1,0 +1,19 @@
+# Repackages the release .deb as a pacman package. Inputs (env): REELSPACE_VERSION (semver), REELSPACE_DEB (path).
+pkgname=reelspace-bin
+# pacman forbids '-' in pkgver: 0.2.0-alpha.1 -> 0.2.0alpha.1
+pkgver="${REELSPACE_VERSION//-/}"
+pkgrel=1
+pkgdesc="Local-first library for gameplay recordings and clips"
+arch=(x86_64)
+url="https://github.com/canikou/reelspace"
+license=(custom)
+depends=(webkit2gtk-4.1 gtk3 gst-plugins-good)
+optdepends=('gst-libav: more video codecs in the player')
+provides=(reelspace)
+conflicts=(reelspace)
+options=(!strip !debug)
+
+package() {
+  # bsdtar reads the ar container; data.tar.* may be gz/xz/zst.
+  bsdtar -xOf "$REELSPACE_DEB" 'data.tar.*' | bsdtar -xf - -C "$pkgdir"
+}

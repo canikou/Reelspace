@@ -4,6 +4,8 @@ import type {
   AppErrorCode,
   AppErrorPayload,
   AppSnapshot,
+  ArchiveStatus,
+  ArchiveAccount,
   AudioPreviewResult,
   AudioTrack,
   Collection,
@@ -12,6 +14,12 @@ import type {
   LibraryDataImportSummary,
   MediaItem,
   MediaKind,
+  Game,
+  GameAssignment,
+  MediaEvent,
+  RecorderApp,
+  RepairSummary,
+  UploadJob,
   StorageStats
 } from "./types";
 
@@ -99,5 +107,42 @@ export const api = {
   revealInExplorer: (id: string) => invokeCommand<void>("reveal_in_explorer", { id }),
   getStorageStats: () => invokeCommand<StorageStats>("get_storage_stats"),
   getCleanupCandidates: () => invokeCommand<MediaItem[]>("get_cleanup_candidates"),
-  deleteRawFile: (id: string) => invokeCommand<MediaItem[]>("delete_raw_file", { id })
+  deleteRawFile: (id: string) => invokeCommand<MediaItem[]>("delete_raw_file", { id }),
+  listGames: () => invokeCommand<Game[]>("list_games"),
+  createGame: (name: string) => invokeCommand<Game[]>("create_game", { name }),
+  listGameAssignments: () => invokeCommand<GameAssignment[]>("list_game_assignments"),
+  renameGame: (id: string, name: string, preserveAlias = true) =>
+    invokeCommand<Game[]>("rename_game", { id, name, preserveAlias }),
+  mergeGames: (sourceId: string, targetId: string) =>
+    invokeCommand<Game[]>("merge_games", { sourceId, targetId }),
+  assignGame: (mediaId: string, gameId: string) =>
+    invokeCommand<GameAssignment[]>("assign_game", { mediaId, gameId }),
+  listArchiveStatuses: () => invokeCommand<ArchiveStatus[]>("list_archive_statuses"),
+  setKeepLocal: (mediaId: string, keepLocal: boolean) =>
+    invokeCommand<ArchiveStatus[]>("set_keep_local", { mediaId, keepLocal }),
+  queueArchive: (mediaIds: string[]) => invokeCommand<number>("queue_archive", { mediaIds }),
+  listUploadJobs: () => invokeCommand<UploadJob[]>("list_upload_jobs"),
+  controlUploadQueue: (action: string, jobId?: string | null) =>
+    invokeCommand<UploadJob[]>("control_upload_queue", { action, jobId }),
+  listMediaEvents: (mediaId: string) =>
+    invokeCommand<MediaEvent[]>("list_media_events", { mediaId }),
+  removeFromCollection: (collectionId: string, mediaId: string) =>
+    invokeCommand<void>("remove_from_collection", { collectionId, mediaId }),
+  setCollectionStorageDefault: (
+    collectionId: string,
+    policy: "keepLocal" | "archive" | null,
+  ) => invokeCommand<Collection[]>("set_collection_storage_default", { collectionId, policy }),
+  detectRecordingApps: () => invokeCommand<RecorderApp[]>("detect_recording_apps"),
+  launchRecordingApp: (id: string) => invokeCommand<void>("launch_recording_app", { id }),
+  removeLocalCopy: (mediaId: string) =>
+    invokeCommand<ArchiveStatus[]>("remove_local_copy", { mediaId }),
+  openRemoteCopy: (mediaId: string) => invokeCommand<void>("open_remote_copy", { mediaId }),
+  repairLibrary: () => invokeCommand<RepairSummary>("repair_library"),
+  getArchiveAccount: () => invokeCommand<ArchiveAccount | null>("get_archive_account"),
+  connectYouTube: () => invokeCommand<ArchiveAccount>("connect_youtube"),
+  disconnectYouTube: () => invokeCommand<void>("disconnect_youtube"),
+  deleteYouTubeRemote: (mediaId: string) =>
+    invokeCommand<void>("delete_youtube_remote", { mediaId }),
+  openDiagnosticsFolder: () => invokeCommand<void>("open_diagnostics_folder"),
+  exportDiagnostics: (path: string) => invokeCommand<void>("export_diagnostics", { path }),
 };

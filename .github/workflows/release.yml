@@ -1,25 +1,35 @@
-name: Release Windows alpha
+name: Release
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release (for example v0.2.0-alpha.1)
+        required: true
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
-  windows-x64:
-    name: Build and publish Windows x64
+  windows:
+    name: Build Windows x64
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
       - name: Check out tagged source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Install pnpm
         uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
@@ -55,7 +65,7 @@ jobs:
 
       - name: Verify tag and source versions
         shell: pwsh
-        run: ./scripts/check-version.ps1 -Tag $env:GITHUB_REF_NAME
+        run: ./scripts/check-version.ps1 -Tag $env:TAG
 
       - name: Provision verified FFmpeg resources
         shell: pwsh
@@ -77,56 +87,245 @@ jobs:
         run: ./scripts/test-release-media.ps1
 
       - name: Build Tauri NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri:build
 
       - name: Verify packaged Windows executable metadata
         shell: pwsh
-        run: ./scripts/check-windows-binary.ps1 -Path "src-tauri/target/release/reelspace.exe" -ExpectedVersion ($env:GITHUB_REF_NAME.Substring(1))
+        run: ./scripts/check-windows-binary.ps1 -Path "src-tauri/target/release/reelspace.exe" -ExpectedVersion ($env:TAG.Substring(1))
 
-      - name: Name and checksum release assets
-        id: package
+      - name: Name release assets and build portable zip
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.Substring(1)
-          $installers = @(Get-ChildItem -LiteralPath "src-tauri/target/release/bundle/nsis" -File -Filter "*.exe")
-          if ($installers.Count -ne 1) {
-            throw "Expected exactly one NSIS installer; found $($installers.Count)."
-          }
-          $releaseDirectory = Join-Path $env:RUNNER_TEMP "reelspace-release"
-          New-Item -ItemType Directory -Path $releaseDirectory | Out-Null
-          $fileName = "Reelspace_${version}_windows_x64_setup.exe"
-          $installer = Join-Path $releaseDirectory $fileName
-          Copy-Item -LiteralPath $installers[0].FullName -Destination $installer
-          $checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          $checksumPath = "$installer.sha256"
-          "$checksum  $fileName" | Set-Content -LiteralPath $checksumPath -Encoding ascii
-          $notes = "docs/releases/$($env:GITHUB_REF_NAME).md"
-          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
-            throw "Release notes are missing: $notes"
-          }
-          "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "checksum=$checksumPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "notes=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "prerelease=$($version.Contains('-').ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $version = $env:TAG.Substring(1)
+          $out = Join-Path $env:RUNNER_TEMP "out"
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $nsis = "src-tauri/target/release/bundle/nsis"
+          $installers = @(Get-ChildItem -LiteralPath $nsis -File -Filter "*.exe")
+          $signatures = @(Get-ChildItem -LiteralPath $nsis -File -Filter "*.sig")
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer; found $($installers.Count)." }
+          if ($signatures.Count -ne 1) { throw "Expected exactly one Tauri updater signature; found $($signatures.Count)." }
+          $setup = "Reelspace_${version}_windows_x64_setup.exe"
+          Copy-Item -LiteralPath $installers[0].FullName -Destination (Join-Path $out $setup)
+          Copy-Item -LiteralPath $signatures[0].FullName -Destination (Join-Path $out "$setup.sig")
+          $checksum = (Get-FileHash -LiteralPath (Join-Path $out $setup) -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum  $setup" | Set-Content -LiteralPath (Join-Path $out "$setup.sha256") -Encoding ascii
+          # Resource dir == exe dir on Windows, so the zip mirrors the installed layout.
+          $stage = Join-Path $env:RUNNER_TEMP "portable"
+          New-Item -ItemType Directory -Path "$stage/vendor/ffmpeg/bin" -Force | Out-Null
+          Copy-Item "src-tauri/target/release/reelspace.exe" $stage
+          Copy-Item "vendor/ffmpeg/bin/ffmpeg.exe", "vendor/ffmpeg/bin/ffprobe.exe" "$stage/vendor/ffmpeg/bin"
+          Copy-Item "vendor/ffmpeg/LICENSE.txt" "$stage/vendor/ffmpeg"
+          Compress-Archive -Path "$stage/*" -DestinationPath (Join-Path $out "Reelspace_${version}_windows_x64_portable.zip")
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  linux:
+    name: Build Linux x64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: 11.9.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libdbus-1-dev libssl-dev build-essential curl file xdg-utils
+
+      - name: Configure stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustc -vV
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: linux-x64-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: linux-x64-cargo-
+
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Provision verified FFmpeg resources
+        run: ./scripts/prepare-ffmpeg.sh
+
+      - name: Build and test frontend
+        run: |
+          pnpm build
+          pnpm test
+
+      - name: Check, lint, and test Rust
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Build Tauri bundles
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NO_STRIP: "true" # linuxdeploy's bundled strip breaks on newer toolchains
+        run: pnpm tauri:build
+
+      - name: Name release assets
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          b=src-tauri/target/release/bundle
+          mkdir out
+          one() { local f=("$@"); [[ ${#f[@]} -eq 1 && -f ${f[0]} ]] || { echo "Expected exactly one of: $*" >&2; exit 1; }; echo "${f[0]}"; }
+          cp "$(one $b/deb/*.deb)" "out/Reelspace_${version}_linux_amd64.deb"
+          cp "$(one $b/rpm/*.rpm)" "out/Reelspace_${version}_linux_x86_64.rpm"
+          cp "$(one $b/appimage/*.AppImage)" "out/Reelspace_${version}_linux_x86_64.AppImage"
+          cp "$(one $b/appimage/*.AppImage.sig)" "out/Reelspace_${version}_linux_x86_64.AppImage.sig"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/*
+          if-no-files-found: error
+
+  arch:
+    name: Build Arch package
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: archlinux:base-devel
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux
+          path: linux
+
+      - name: Build pacman package
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          # Install runtime deps up front so makepkg's own dependency check passes without --nodeps.
+          pacman -Syu --noconfirm webkit2gtk-4.1 gtk3 gst-plugins-good
+          useradd -m builder
+          work=/home/builder/work
+          mkdir -p "$work/dest"
+          cp packaging/arch/PKGBUILD "$work/"
+          cp "linux/Reelspace_${version}_linux_amd64.deb" "$work/reelspace.deb"
+          chown -R builder:builder "$work"
+          cd "$work"
+          su builder -c "REELSPACE_VERSION='$version' REELSPACE_DEB='$work/reelspace.deb' PKGDEST='$work/dest' makepkg -f"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp dest/reelspace-bin-*.pkg.tar.zst "$GITHUB_WORKSPACE/out/Reelspace_${version}_linux_x86_64.pkg.tar.zst"
+
+      - name: Upload Arch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [windows, linux, arch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Prepare release files
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          notes="docs/releases/${TAG}.md"
+          [[ -f "$notes" ]] || { echo "Release notes are missing: $notes" >&2; exit 1; }
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          win="Reelspace_${version}_windows_x64_setup.exe"
+          app="Reelspace_${version}_linux_x86_64.AppImage"
+          (cd dist && sha256sum -- $(ls | grep -v -e '\.sha256$' -e '^SHA256SUMS.txt$') > SHA256SUMS.txt)
+          jq -n \
+            --arg version "$version" \
+            --rawfile notes "$notes" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg winsig "$(tr -d '\r\n' < "dist/$win.sig")" --arg winurl "$base/$win" \
+            --arg linsig "$(tr -d '\r\n' < "dist/$app.sig")" --arg linurl "$base/$app" \
+            '{version:$version, notes:$notes, pub_date:$pub_date, platforms:{
+              "windows-x86_64":{signature:$winsig, url:$winurl},
+              "windows-x86_64-nsis":{signature:$winsig, url:$winurl},
+              "linux-x86_64-appimage":{signature:$linsig, url:$linurl}}}' > dist/latest.json
+          # No bare "linux-x86_64" key on purpose: deb/rpm/pacman installs would otherwise
+          # fall back to the AppImage and hand it to dpkg/rpm. They update via their package.
+          ls -l dist
 
       - name: Publish GitHub release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          INSTALLER: ${{ steps.package.outputs.installer }}
-          CHECKSUM: ${{ steps.package.outputs.checksum }}
-          NOTES: ${{ steps.package.outputs.notes }}
-          IS_PRERELEASE: ${{ steps.package.outputs.prerelease }}
         run: |
-          $title = "Reelspace $($env:GITHUB_REF_NAME.Substring(1))"
-          if (gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY 2>$null) {
-            gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title $title --notes-file $env:NOTES
-            gh release upload $env:GITHUB_REF_NAME $env:INSTALLER $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --clobber
-          } else {
-            $arguments = @("release", "create", $env:GITHUB_REF_NAME, $env:INSTALLER, $env:CHECKSUM, "--repo", $env:GITHUB_REPOSITORY, "--verify-tag", "--title", $title, "--notes-file", $env:NOTES)
-            if ($env:IS_PRERELEASE -eq "true") {
-              $arguments += "--prerelease"
-            }
-            & gh @arguments
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          set -euo pipefail
+          version="${TAG#v}"
+          title="Reelspace $version"
+          notes="docs/releases/${TAG}.md"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title" --notes-file "$notes"
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "$title" --notes-file "$notes")
+            [[ "$version" == *-* ]] && args+=(--prerelease)
+            gh release create "$TAG" dist/* "${args[@]}"
+          fi
+
+      - name: Update signed updater channel
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          if [[ "$version" == *-* ]]; then
+            channel=updater-alpha; title="Reelspace Alpha Update Channel"; pre=(--prerelease)
+          else
+            channel=updater-stable; title="Reelspace Stable Update Channel"; pre=()
+          fi
+          notes="Machine-readable Reelspace update channel. Installers remain attached to their versioned releases."
+          if gh release view "$channel" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$channel" --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes"
+            gh release upload "$channel" dist/latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$channel" dist/latest.json --repo "$GITHUB_REPOSITORY" --target master --title "$title" --notes "$notes" "${pre[@]}"
+          fi

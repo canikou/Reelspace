@@ -30,3 +30,13 @@ export async function pickLibraryDataExport(): Promise<string | null> {
   });
   return typeof selected === "string" ? selected : null;
 }
+
+export async function pickDiagnosticsExport(): Promise<string | null> {
+  const date = new Date().toISOString().slice(0, 10);
+  const selected = await save({
+    title: "Export Reelspace diagnostics",
+    defaultPath: `reelspace-diagnostics-${date}.json`,
+    filters: [{ name: "Reelspace diagnostics", extensions: ["json"] }]
+  });
+  return typeof selected === "string" ? selected : null;
+}

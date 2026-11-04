@@ -95,6 +95,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(windows)]
     #[test]
     fn rotated_logs_have_stable_names() {
         assert_eq!(

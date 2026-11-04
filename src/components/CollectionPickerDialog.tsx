@@ -1,7 +1,7 @@
-import { Library, Plus } from "lucide-react";
 import { useRef, useState } from "react";
 import type { Collection, MediaItem } from "../lib/types";
 import { Dialog } from "./Dialog";
+import { AppIcon } from "./icons";
 
 export function CollectionPickerDialog({
   item,
@@ -39,15 +39,15 @@ export function CollectionPickerDialog({
       <div className="collection-picker">
         {collections.map((collection) => (
           <button key={collection.id} onClick={() => pick(collection)} disabled={busyId !== null}>
-            <Library size={17} />
+            <AppIcon name="collection" size={17} />
             <span>{collection.name}</span>
             <small>{busyId === collection.id ? "…" : collection.itemCount}</small>
           </button>
         ))}
         <button className="create-row" onClick={onCreate} disabled={busyId !== null}>
-          <Plus size={17} /> <span>New collection</span>
+          <AppIcon name="add" size={17} /> <span>New collection</span>
         </button>
-        {error ? <div className="inline-error">{error}</div> : null}
+        {error ? <div className="inline-error" role="alert">{error}</div> : null}
       </div>
     </Dialog>
   );

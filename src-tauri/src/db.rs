@@ -37,6 +37,45 @@ pub(crate) struct PortableCollectionUpdate {
     pub id: String,
     pub name: String,
     pub media_ids: Vec<String>,
+    pub storage_default: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PortableGameUpdate {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PortableMediaFeatureUpdate {
+    pub media_id: String,
+    pub game_id: Option<String>,
+    pub keep_local: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PortableRemoteAssetUpdate {
+    pub id: String,
+    pub media_id: String,
+    pub provider: String,
+    pub provider_remote_id: String,
+    pub browser_url: Option<String>,
+    pub privacy_status: Option<String>,
+    pub verification_status: String,
+    pub processing_status: String,
+    pub verified_at: Option<i64>,
+    pub last_checked_at: i64,
+}
+
+pub(crate) struct PortableImportBatch<'a> {
+    pub restored_items: &'a [MediaItem],
+    pub media_updates: &'a [PortableMediaUpdate],
+    pub collections: &'a [PortableCollectionUpdate],
+    pub games: &'a [PortableGameUpdate],
+    pub media_features: &'a [PortableMediaFeatureUpdate],
+    pub remote_assets: &'a [PortableRemoteAssetUpdate],
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -45,7 +84,7 @@ pub(crate) struct PortableImportChanges {
     pub memberships_added: u64,
 }
 
-const DATABASE_SCHEMA_VERSION: i64 = 3;
+const DATABASE_SCHEMA_VERSION: i64 = 4;
 pub const PROBE_SCHEMA_VERSION: i64 = 1;
 
 impl Database {
@@ -92,7 +131,7 @@ impl Database {
         })
     }
 
-    fn conn(&self) -> AppResult<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn conn(&self) -> AppResult<std::sync::MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|_| {
             app_error(
                 ErrorCode::DatabaseUnavailable,
@@ -196,7 +235,102 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_thumbnail_jobs_ready
               ON thumbnail_jobs(state, next_attempt_at, priority DESC, updated_at);
 
+            CREATE TABLE IF NOT EXISTS games (
+              id TEXT PRIMARY KEY NOT NULL,
+              name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+              color TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS game_aliases (
+              alias_key TEXT PRIMARY KEY NOT NULL,
+              source_label TEXT NOT NULL,
+              game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+              created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS media_classification (
+              media_id TEXT PRIMARY KEY NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              game_id TEXT NOT NULL REFERENCES games(id),
+              source_value TEXT,
+              assigned_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_media_classification_game ON media_classification(game_id);
+
+            CREATE TABLE IF NOT EXISTS media_preferences (
+              media_id TEXT PRIMARY KEY NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              keep_local INTEGER NOT NULL DEFAULT 0 CHECK(keep_local IN (0, 1)),
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS collection_preferences (
+              collection_id TEXT PRIMARY KEY NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+              keep_local_default INTEGER CHECK(keep_local_default IN (0, 1)),
+              remote_only_default INTEGER CHECK(remote_only_default IN (0, 1)),
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS remote_assets (
+              id TEXT PRIMARY KEY NOT NULL,
+              media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              provider TEXT NOT NULL,
+              provider_remote_id TEXT NOT NULL,
+              browser_url TEXT,
+              privacy_status TEXT,
+              verification_status TEXT NOT NULL,
+              processing_status TEXT NOT NULL,
+              verified_at INTEGER,
+              last_checked_at INTEGER NOT NULL,
+              UNIQUE(provider, provider_remote_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_remote_assets_media ON remote_assets(media_id, verification_status);
+
+            CREATE TABLE IF NOT EXISTS upload_jobs (
+              id TEXT PRIMARY KEY NOT NULL,
+              media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              provider TEXT NOT NULL,
+              state TEXT NOT NULL,
+              priority INTEGER NOT NULL DEFAULT 0,
+              bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+              total_bytes INTEGER NOT NULL DEFAULT 0,
+              session_url TEXT,
+              provider_remote_id TEXT,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              next_attempt_at INTEGER NOT NULL DEFAULT 0,
+              error TEXT,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_upload_jobs_ready ON upload_jobs(state, next_attempt_at, priority DESC, created_at);
+
+            CREATE TABLE IF NOT EXISTS media_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              event TEXT NOT NULL,
+              detail TEXT,
+              created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_media_events_media ON media_events(media_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS archive_accounts (
+              provider TEXT PRIMARY KEY NOT NULL,
+              account_id TEXT NOT NULL,
+              display_name TEXT NOT NULL,
+              connected_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS local_removals (
+              media_id TEXT PRIMARY KEY NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+              original_path TEXT NOT NULL,
+              removed_at INTEGER NOT NULL
+            );
+
             UPDATE thumbnail_jobs SET state = 'queued' WHERE state = 'running';
+            UPDATE upload_jobs SET state = 'queued', error = 'Recovered after Reelspace restarted' WHERE state IN ('preparing', 'uploading', 'verifying');
             "#,
             )
             .map_err(|error| {
@@ -538,10 +672,16 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             r#"
-            SELECT c.id, c.name, COUNT(ci.media_id) AS item_count
+            SELECT c.id, c.name, COUNT(ci.media_id) AS item_count,
+                   CASE
+                     WHEN cp.keep_local_default = 1 THEN 'keepLocal'
+                     WHEN cp.remote_only_default = 1 THEN 'archive'
+                     ELSE NULL
+                   END AS storage_default
             FROM collections c
             LEFT JOIN collection_items ci ON ci.collection_id = c.id
-            GROUP BY c.id, c.name
+            LEFT JOIN collection_preferences cp ON cp.collection_id = c.id
+            GROUP BY c.id, c.name, cp.keep_local_default, cp.remote_only_default
             ORDER BY c.name COLLATE NOCASE
             "#,
         )?;
@@ -550,6 +690,7 @@ impl Database {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 item_count: row.get::<_, i64>(2)? as u32,
+                storage_default: row.get(3)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -595,17 +736,23 @@ impl Database {
 
     pub(crate) fn apply_portable_import(
         &self,
-        restored_items: &[MediaItem],
-        updates: &[PortableMediaUpdate],
-        collections: &[PortableCollectionUpdate],
+        batch: PortableImportBatch<'_>,
         imported_at: i64,
     ) -> AppResult<PortableImportChanges> {
+        let PortableImportBatch {
+            restored_items,
+            media_updates,
+            collections,
+            games,
+            media_features,
+            remote_assets,
+        } = batch;
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for item in restored_items {
             upsert_media_on(&transaction, item)?;
         }
-        for update in updates {
+        for update in media_updates {
             let changed = transaction.execute(
                 "UPDATE media SET tags_json = ?1, notes = ?2 WHERE id = ?3",
                 params![
@@ -617,6 +764,73 @@ impl Database {
             if changed != 1 {
                 return Err(user_error("an imported media reference became unavailable"));
             }
+        }
+        for game in games {
+            let existing_name: Option<String> = transaction
+                .query_row("SELECT name FROM games WHERE id = ?1", [&game.id], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            if existing_name
+                .as_ref()
+                .is_some_and(|name| !name.eq_ignore_ascii_case(&game.name))
+            {
+                return Err(user_error(
+                    "an imported game identifier conflicts with local data",
+                ));
+            }
+            transaction.execute(
+                "INSERT OR IGNORE INTO games (id, name, color, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![game.id, game.name, game.color, imported_at],
+            )?;
+            for alias in &game.aliases {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO game_aliases (alias_key, source_label, game_id, created_at) VALUES (LOWER(?1), ?1, ?2, ?3)",
+                    params![alias, game.id, imported_at],
+                )?;
+            }
+        }
+        for feature in media_features {
+            if let Some(game_id) = &feature.game_id {
+                transaction.execute(
+                    "INSERT INTO media_classification (media_id, game_id, source_value, assigned_at) VALUES (?1, ?2, NULL, ?3)
+                     ON CONFLICT(media_id) DO UPDATE SET game_id = excluded.game_id, assigned_at = excluded.assigned_at",
+                    params![feature.media_id, game_id, imported_at],
+                )?;
+            }
+            if let Some(keep_local) = feature.keep_local {
+                transaction.execute(
+                    "INSERT INTO media_preferences (media_id, keep_local, updated_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(media_id) DO UPDATE SET keep_local = excluded.keep_local, updated_at = excluded.updated_at",
+                    params![feature.media_id, keep_local, imported_at],
+                )?;
+            }
+        }
+        for asset in remote_assets {
+            transaction.execute(
+                "INSERT INTO remote_assets (id, media_id, provider, provider_remote_id, browser_url, privacy_status, verification_status, processing_status, verified_at, last_checked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(provider, provider_remote_id) DO UPDATE SET
+                   browser_url = excluded.browser_url,
+                   privacy_status = excluded.privacy_status,
+                   verification_status = excluded.verification_status,
+                   processing_status = excluded.processing_status,
+                   verified_at = excluded.verified_at,
+                   last_checked_at = excluded.last_checked_at
+                 WHERE remote_assets.media_id = excluded.media_id",
+                params![
+                    asset.id,
+                    asset.media_id,
+                    asset.provider,
+                    asset.provider_remote_id,
+                    asset.browser_url,
+                    asset.privacy_status,
+                    asset.verification_status,
+                    asset.processing_status,
+                    asset.verified_at,
+                    asset.last_checked_at,
+                ],
+            )?;
         }
         let mut changes = PortableImportChanges::default();
         for collection in collections {
@@ -639,6 +853,18 @@ impl Database {
                 "INSERT OR IGNORE INTO collections (id, name, created_at) VALUES (?1, ?2, ?3)",
                 params![collection.id, collection.name, imported_at],
             )? as u64;
+            if let Some(policy) = &collection.storage_default {
+                let keep_local = policy == "keepLocal";
+                transaction.execute(
+                    "INSERT INTO collection_preferences (collection_id, keep_local_default, remote_only_default, updated_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(collection_id) DO UPDATE SET
+                       keep_local_default = excluded.keep_local_default,
+                       remote_only_default = excluded.remote_only_default,
+                       updated_at = excluded.updated_at",
+                    params![collection.id, keep_local, !keep_local, imported_at],
+                )?;
+            }
             for media_id in &collection.media_ids {
                 changes.memberships_added += transaction.execute(
                     "INSERT OR IGNORE INTO collection_items (collection_id, media_id, added_at) VALUES (?1, ?2, ?3)",
@@ -929,14 +1155,22 @@ mod tests {
         db.create_collection(&collection_id, "Local", 1)
             .expect("local collection");
         let restored = item("C:\\captures\\restored.mp4", MediaKind::Raw);
+        let restored_items = [restored];
+        let collections = [PortableCollectionUpdate {
+            id: collection_id,
+            name: "Conflicting".into(),
+            media_ids: Vec::new(),
+            storage_default: None,
+        }];
         let result = db.apply_portable_import(
-            &[restored],
-            &[],
-            &[PortableCollectionUpdate {
-                id: collection_id,
-                name: "Conflicting".into(),
-                media_ids: Vec::new(),
-            }],
+            PortableImportBatch {
+                restored_items: &restored_items,
+                media_updates: &[],
+                collections: &collections,
+                games: &[],
+                media_features: &[],
+                remote_assets: &[],
+            },
             2,
         );
         assert!(result.is_err());

@@ -1,5 +1,5 @@
+use crate::desktop;
 use crate::error::{app_error, user_error, AppError, AppResult, ErrorCode};
-use crate::explorer;
 use crate::media;
 use crate::models::{
     AppSettings, AppSnapshot, AudioPreviewResult, AudioTrack, Collection, CreateClipRequest,
@@ -119,6 +119,9 @@ pub fn get_app_state(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
         settings,
         ffmpeg: state.ffmpeg.health(),
         stats,
+        active_media_work: state.media_jobs.active_count() > 0
+            || state.export_jobs.active_count() > 0
+            || state.background_jobs.active_count() > 0,
     })
 }
 
@@ -166,7 +169,7 @@ impl Drop for ScanInFlightGuard {
     }
 }
 
-fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
+pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
     let _index_guard = state
         .media_index_lock
         .lock()
@@ -246,14 +249,32 @@ fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
         .cloned()
         .collect::<Vec<_>>();
     state.db.upsert_media_batch(&changed_items)?;
+    state.db.classify_media_items(&changed_items)?;
+    if settings.automatically_archive_recordings {
+        let media_ids = changed_items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        if !media_ids.is_empty() {
+            let _ = state.db.queue_archive(&media_ids)?;
+        }
+    }
     for item in existing_items {
         let path = Path::new(&item.path);
         if belongs_to_roots(path, &reachable_sources)
             && !belongs_to_roots(path, &excluded_roots)
             && matches!(path.try_exists(), Ok(false))
         {
-            state.db.delete_media(&item.id)?;
-            files_missing += 1;
+            if state.db.has_verified_remote(&item.id)? {
+                state.db.record_media_event(
+                    &item.id,
+                    "local_copy_missing",
+                    Some("Preserved because a verified remote copy exists"),
+                )?;
+            } else {
+                state.db.delete_media(&item.id)?;
+                files_missing += 1;
+            }
         }
     }
     let queued_thumbnails = queue_missing_thumbnails(state, 0, false)?;
@@ -524,6 +545,12 @@ pub fn add_to_collection(
     state
         .db
         .add_to_collection(&collection_id, &media_id, Utc::now().timestamp())?;
+    if let Some(policy) = state.db.collection_storage_default(&collection_id)? {
+        state.db.set_keep_local(&media_id, policy == "keepLocal")?;
+        if policy == "archive" && Path::new(&state.db.get_media(&media_id)?.path).is_file() {
+            state.db.queue_archive(std::slice::from_ref(&media_id))?;
+        }
+    }
     state.db.list_collections()
 }
 
@@ -699,6 +726,12 @@ fn create_clip_inner(state: &AppState, mut request: CreateClipRequest) -> AppRes
         }
         return Err(error);
     }
+    state
+        .db
+        .initialize_clip_preferences(&source.id, &item.id, settings.keep_local_clips)?;
+    if settings.automatically_archive_clips {
+        state.db.queue_archive(std::slice::from_ref(&item.id))?;
+    }
     state.telemetry.event(
         "info",
         "clip.export.ready",
@@ -719,7 +752,7 @@ fn create_clip_inner(state: &AppState, mut request: CreateClipRequest) -> AppRes
 pub fn reveal_in_explorer(state: State<'_, AppState>, id: String) -> AppResult<()> {
     validate_id(&id, "media")?;
     let item = state.db.get_media(&id)?;
-    explorer::reveal(Path::new(&item.path))
+    desktop::reveal(Path::new(&item.path))
 }
 
 #[tauri::command]
@@ -814,6 +847,9 @@ fn resolve_clip_dir(settings: &AppSettings, data_dir: &Path) -> AppResult<PathBu
 }
 
 fn validate_settings(settings: &AppSettings) -> AppResult<()> {
+    if !matches!(settings.theme.as_str(), "system" | "dark" | "light") {
+        return Err(user_error("theme must be system, dark, or light"));
+    }
     if !(50..=99).contains(&settings.cleanup_threshold_percent) {
         return Err(user_error(
             "cleanup threshold must be between 50 and 99 percent",
@@ -850,7 +886,7 @@ fn validate_settings(settings: &AppSettings) -> AppResult<()> {
         {
             return Err(app_error(
                 ErrorCode::InvalidPath,
-                "Configured folders must use absolute Windows paths",
+                "Configured folders must use absolute paths",
             ));
         }
     }
@@ -899,7 +935,7 @@ fn output_roots(settings: &AppSettings) -> Vec<PathBuf> {
 fn path_is_within(path: &Path, root: &Path) -> bool {
     let path_key = media::normalized_path_key(path);
     let root_key = media::normalized_path_key(root);
-    path_key == root_key || path_key.starts_with(&format!("{root_key}\\"))
+    media::path_key_is_within(&path_key, &root_key)
 }
 
 fn belongs_to_roots(path: &Path, roots: &[PathBuf]) -> bool {
@@ -1353,6 +1389,7 @@ fn contains_forbidden_control(value: &str, allow_layout_whitespace: bool) -> boo
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn managed_root_checks_do_not_accept_sibling_prefixes() {
         assert!(path_is_within(
@@ -1365,11 +1402,36 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn generated_outputs_cannot_be_configured_inside_raw_sources() {
         let settings = AppSettings {
             source_folders: vec!["C:\\captures".to_string()],
             clip_folder: Some("C:\\captures\\clips".to_string()),
+            ..AppSettings::default()
+        };
+        let error = validate_settings(&settings).expect_err("nested output must fail");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_managed_roots_are_case_sensitive_and_reject_sibling_prefixes() {
+        assert!(path_is_within(
+            Path::new("/home/u/Clips/game/clip.mp4"),
+            Path::new("/home/u/Clips/")
+        ));
+        assert!(!path_is_within(
+            Path::new("/home/u/Clips-private/clip.mp4"),
+            Path::new("/home/u/Clips")
+        ));
+        assert!(!path_is_within(
+            Path::new("/home/u/clips/clip.mp4"),
+            Path::new("/home/u/Clips")
+        ));
+        let settings = AppSettings {
+            source_folders: vec!["/home/u/Videos".to_string()],
+            clip_folder: Some("/home/u/Videos/clips".to_string()),
             ..AppSettings::default()
         };
         let error = validate_settings(&settings).expect_err("nested output must fail");
