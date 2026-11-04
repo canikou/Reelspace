@@ -1000,3 +1000,9 @@ mod tests {
         assert_eq!(archive_state("", 2, true, true), "multipleRemoteCopies");
     }
 }
+
+/// The background recorder daemon only exists on Linux; the UI hides its section elsewhere.
+#[tauri::command]
+pub fn recorder_supported() -> bool {
+    cfg!(target_os = "linux")
+}

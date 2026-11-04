@@ -18,6 +18,9 @@ import type {
   GameAssignment,
   MediaEvent,
   RecorderApp,
+  RecorderConfig,
+  RecorderServiceState,
+  RecorderStatus,
   RepairSummary,
   UploadJob,
   StorageStats
@@ -145,4 +148,15 @@ export const api = {
     invokeCommand<void>("delete_youtube_remote", { mediaId }),
   openDiagnosticsFolder: () => invokeCommand<void>("open_diagnostics_folder"),
   exportDiagnostics: (path: string) => invokeCommand<void>("export_diagnostics", { path }),
+  recorderSupported: () => invokeCommand<boolean>("recorder_supported"),
+  recorderGetConfig: () => invokeCommand<RecorderConfig>("recorder_get_config"),
+  /** Resolves true when a running daemon reloaded the config. */
+  recorderSaveConfig: (config: RecorderConfig) => invokeCommand<boolean>("recorder_save_config", { config }),
+  recorderStatus: () => invokeCommand<RecorderStatus>("recorder_status"),
+  recorderSaveClip: () => invokeCommand<boolean>("recorder_save_clip"),
+  recorderPause: () => invokeCommand<void>("recorder_pause"),
+  recorderResume: () => invokeCommand<void>("recorder_resume"),
+  recorderDeleteRollingArchive: () => invokeCommand<number>("recorder_delete_rolling_archive"),
+  recorderServiceState: () => invokeCommand<RecorderServiceState>("recorder_service_state"),
+  recorderEnableService: () => invokeCommand<void>("recorder_enable_service"),
 };

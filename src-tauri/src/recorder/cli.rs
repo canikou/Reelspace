@@ -56,7 +56,7 @@ fn proxy() -> Result<Proxy<'static>, String> {
     Proxy::new(&conn, NAME, PATH, IFACE).map_err(|e| e.to_string())
 }
 
-fn json_of(m: HashMap<String, OwnedValue>) -> serde_json::Value {
+pub(crate) fn json_of(m: HashMap<String, OwnedValue>) -> serde_json::Value {
     use zbus::zvariant::Value as V;
     m.into_iter()
         .map(|(k, v)| {

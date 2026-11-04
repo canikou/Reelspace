@@ -10,6 +10,8 @@ pub mod models;
 pub mod portability;
 #[cfg(target_os = "linux")]
 pub mod recorder;
+#[cfg(target_os = "linux")]
+mod recorder_app;
 mod recovery;
 mod state;
 mod storage;
@@ -19,6 +21,8 @@ mod youtube;
 
 use commands::*;
 use features::*;
+#[cfg(target_os = "linux")]
+use recorder_app::*;
 use state::AppState;
 use tauri::Manager;
 use watcher::start_library_watcher;
@@ -56,6 +60,8 @@ pub fn run() -> error::AppResult<()> {
             start_thumbnail_worker(worker_state);
             start_youtube_worker(archive_worker_state);
             start_library_watcher(watcher_state);
+            #[cfg(target_os = "linux")]
+            setup_tray(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -105,7 +111,26 @@ pub fn run() -> error::AppResult<()> {
             get_archive_account,
             connect_youtube,
             disconnect_youtube,
-            delete_youtube_remote
+            delete_youtube_remote,
+            recorder_supported,
+            #[cfg(target_os = "linux")]
+            recorder_get_config,
+            #[cfg(target_os = "linux")]
+            recorder_save_config,
+            #[cfg(target_os = "linux")]
+            recorder_status,
+            #[cfg(target_os = "linux")]
+            recorder_save_clip,
+            #[cfg(target_os = "linux")]
+            recorder_pause,
+            #[cfg(target_os = "linux")]
+            recorder_resume,
+            #[cfg(target_os = "linux")]
+            recorder_delete_rolling_archive,
+            #[cfg(target_os = "linux")]
+            recorder_service_state,
+            #[cfg(target_os = "linux")]
+            recorder_enable_service
         ])
         .build(tauri::generate_context!());
     let app = match built {
