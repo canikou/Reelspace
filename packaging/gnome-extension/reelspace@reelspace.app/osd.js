@@ -9,6 +9,7 @@ export function formatDuration(seconds) {
 }
 
 // Maps a recorder signal to [icon, label], or null for signals that show nothing.
+// Icon names must exist in Adwaita (GNOME's default theme), else the OSD shows a blank placeholder.
 // lastState dedupes StateChanged so a backoff loop cannot spam the screen.
 export function osdFor(signal, args, lastState) {
     const withGame = (text, game) => (game ? `${text} · ${game}` : text);
@@ -16,13 +17,13 @@ export function osdFor(signal, args, lastState) {
     case 'ClipSaving':
         return ['media-record-symbolic', 'Saving clip…'];
     case 'ClipSaved':
-        return ['emblem-ok-symbolic', withGame(`Clip saved ${formatDuration(args[1])}`, args[2])];
+        return ['object-select-symbolic', withGame(`Clip saved ${formatDuration(args[1])}`, args[2])];
     case 'ClipFailed':
         return ['dialog-warning-symbolic', 'Clip failed'];
     case 'SessionStarted':
         return ['media-record-symbolic', `Recording ${args[0] || 'session'}`];
     case 'SessionEnded':
-        return ['emblem-ok-symbolic', withGame(`Session saved ${formatDuration(args[2])}`, args[0])];
+        return ['object-select-symbolic', withGame(`Session saved ${formatDuration(args[2])}`, args[0])];
     case 'StateChanged': {
         const [state, detail] = args;
         if (state === lastState)
