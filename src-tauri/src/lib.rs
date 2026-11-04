@@ -6,6 +6,8 @@ mod features;
 pub mod ffmpeg;
 mod jobs;
 pub mod media;
+#[cfg(target_os = "linux")]
+mod media_server;
 pub mod models;
 pub mod portability;
 #[cfg(target_os = "linux")]
@@ -28,6 +30,21 @@ use tauri::Manager;
 use watcher::start_library_watcher;
 use youtube::*;
 
+/// Loopback media server base URL (Linux only); see media_server.rs.
+#[cfg(target_os = "linux")]
+struct MediaBase(Option<String>);
+
+#[tauri::command]
+fn media_server_base(app: tauri::AppHandle) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    return app.state::<MediaBase>().0.clone();
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        None
+    }
+}
+
 pub fn run() -> error::AppResult<()> {
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -43,6 +60,20 @@ pub fn run() -> error::AppResult<()> {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let state = AppState::new(app.handle())?;
+            #[cfg(target_os = "linux")]
+            {
+                let scope = state.asset_scope.clone();
+                let base = media_server::start(std::sync::Arc::new(move |p| scope.is_allowed(p)))
+                    .map_err(|e| {
+                        state.telemetry.event(
+                            "error",
+                            "media_server.failed",
+                            serde_json::json!({ "error": e.to_string() }),
+                        )
+                    })
+                    .ok();
+                app.manage(MediaBase(base));
+            }
             state.telemetry.event(
                 "info",
                 "app.started",
@@ -66,6 +97,7 @@ pub fn run() -> error::AppResult<()> {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
+            media_server_base,
             save_settings,
             scan_sources,
             list_media,

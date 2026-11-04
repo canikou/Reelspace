@@ -179,7 +179,15 @@ pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> 
         .telemetry
         .event("info", "library.scan.started", json!({}));
     let settings = state.db.load_settings()?;
-    let existing_items = state.db.list_media(Some(MediaKind::Raw))?;
+    // Recorder clips are scanned like raws but stored as Clips, so track them too.
+    let existing_items = state
+        .db
+        .list_media(None)?
+        .into_iter()
+        .filter(|item| {
+            item.kind == MediaKind::Raw || media::is_recorder_clip(Path::new(&item.path))
+        })
+        .collect::<Vec<_>>();
     let existing = existing_items
         .iter()
         .cloned()
@@ -250,9 +258,21 @@ pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> 
         .collect::<Vec<_>>();
     state.db.upsert_media_batch(&changed_items)?;
     state.db.classify_media_items(&changed_items)?;
-    if settings.automatically_archive_recordings {
+    for item in changed_items.iter().filter(|item| {
+        item.kind == MediaKind::Clip
+            && !existing.contains_key(&media::normalized_path_key(Path::new(&item.path)))
+    }) {
+        state
+            .db
+            .initialize_clip_preferences(&item.id, &item.id, settings.keep_local_clips)?;
+    }
+    {
         let media_ids = changed_items
             .iter()
+            .filter(|item| match item.kind {
+                MediaKind::Clip => settings.automatically_archive_clips,
+                _ => settings.automatically_archive_recordings,
+            })
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
         if !media_ids.is_empty() {
