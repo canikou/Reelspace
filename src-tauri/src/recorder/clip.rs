@@ -83,7 +83,11 @@ pub fn run_save(ctl: &Control, seconds: u32) {
     ) {
         Ok(p) if !p.is_empty() => PathBuf::from(p.lines().last().unwrap_or("")),
         Ok(_) => return fail("recorder returned no file".into(), None),
-        Err(e) => return fail(format!("recorder not running: {e}"), None),
+        Err(e) => {
+            eprintln!("reelspace-recorder: save-replay failed: {e}");
+            ctl.status.lock().unwrap().last_error = e;
+            return fail("Recorder is not running, so no clip was saved".into(), None);
+        }
     };
     let clip_dir = cfg.clip_dir();
     let ts = now_ts();
@@ -129,6 +133,13 @@ pub fn run_save(ctl: &Control, seconds: u32) {
 
 /// D-Bus `SaveClip`: immediate return; "" when a save is already running.
 pub fn save_clip(ctl: &Arc<Control>, seconds: u32) -> String {
+    if ctl.paused.load(std::sync::atomic::Ordering::SeqCst) {
+        ctl.sink.emit(Event::ClipFailed {
+            reason: "Recorder is paused — resume to save clips".into(),
+            raw_path: String::new(),
+        });
+        return String::new();
+    }
     if !ctl.begin_save() {
         return String::new();
     }

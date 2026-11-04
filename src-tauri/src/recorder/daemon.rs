@@ -163,10 +163,18 @@ impl Supervisor {
                 if self.child_started.elapsed() > Duration::from_secs(120) {
                     self.backoff = Duration::from_secs(10);
                 }
-                let msg = format!(
+                let why = self.gsr_stderr();
+                if display_missing(&why) {
+                    self.wait_for_display(&why);
+                    return;
+                }
+                let mut msg = format!(
                     "gpu-screen-recorder exited ({status}); restarting in {}s",
                     self.backoff.as_secs()
                 );
+                if !why.is_empty() {
+                    msg = format!("{msg}: {why}");
+                }
                 self.next_attempt = Instant::now() + self.backoff;
                 self.backoff = (self.backoff * 2).min(Duration::from_secs(60));
                 self.ctl.set_state("error", &msg);
@@ -205,9 +213,11 @@ impl Supervisor {
                     || old.replay_storage != new.replay_storage
                     || old.gsr_path != new.gsr_path;
                 self.ctl.set_cfg(new);
+                // retry now: a fixed config must not wait out the old backoff
+                self.next_attempt = Instant::now();
+                self.backoff = Duration::from_secs(10);
                 if restart && self.child.is_some() {
                     self.shutdown_gsr(Duration::from_secs(35));
-                    self.next_attempt = Instant::now();
                 }
                 self.last_house = Instant::now() - Duration::from_secs(3600);
                 self.ctl.sink.emit(Event::ConfigChanged);
@@ -327,9 +337,13 @@ impl Supervisor {
         let _ = std::fs::remove_file(&self.env.active_state);
         self.housekeeping(cfg);
         let _ = std::fs::remove_file(&self.ctl.sock);
+        let err_file = std::fs::File::create(self.stderr_path())
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
         let child = Command::new(&cfg.gsr_path)
             .args(args_for(cfg, &self.ctl.sock))
             .stdin(Stdio::null())
+            .stderr(err_file)
             .spawn();
         let mut child = match child {
             Ok(c) => c,
@@ -349,7 +363,14 @@ impl Supervisor {
             {
                 let _ = child.kill();
                 let _ = child.wait();
-                self.fail_start("gpu-screen-recorder did not become ready".into());
+                let why = self.gsr_stderr();
+                if display_missing(&why) {
+                    self.wait_for_display(&why);
+                } else if why.is_empty() {
+                    self.fail_start("gpu-screen-recorder did not become ready".into());
+                } else {
+                    self.fail_start(format!("gpu-screen-recorder did not become ready: {why}"));
+                }
                 return;
             }
             std::thread::sleep(Duration::from_millis(200));
@@ -357,7 +378,38 @@ impl Supervisor {
         self.child = Some(child);
         self.child_started = Instant::now();
         self.disk_blocked = false;
-        self.ctl.set_state("recording", "");
+        self.ctl.set_state(self.run_state(cfg), "");
+    }
+
+    fn stderr_path(&self) -> PathBuf {
+        self.ctl.sock.with_extension("err")
+    }
+
+    /// Last lines of gsr's stderr from its most recent start.
+    fn gsr_stderr(&self) -> String {
+        let text = std::fs::read_to_string(self.stderr_path()).unwrap_or_default();
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        lines[lines.len().saturating_sub(3)..].join(" | ")
+    }
+
+    /// Monitor off / output gone: quiet retry, no critical notification.
+    fn wait_for_display(&mut self, why: &str) {
+        self.ctl.set_state("waiting_display", why);
+        self.ctl.status.lock().unwrap().last_error = why.into();
+        self.next_attempt = Instant::now() + Duration::from_secs(3);
+    }
+
+    /// `recording` while a continuous recording is running or about to start, else `replay` (replay buffer only).
+    fn run_state(&self, cfg: &Config) -> &'static str {
+        if self.rec.is_some() || self.desired(cfg).is_some() {
+            "recording"
+        } else {
+            "replay"
+        }
     }
 
     fn fail_start(&mut self, msg: String) {
@@ -534,7 +586,7 @@ impl Supervisor {
         } else {
             if self.disk_blocked {
                 self.disk_blocked = false;
-                self.ctl.set_state("recording", "");
+                self.ctl.set_state(self.run_state(cfg), "");
             }
             true
         }
@@ -568,6 +620,12 @@ impl Supervisor {
     }
 
     fn refresh_status(&mut self, cfg: &Config) {
+        if matches!(
+            self.ctl.status.lock().unwrap().state.as_str(),
+            "recording" | "replay"
+        ) {
+            self.ctl.set_state(self.run_state(cfg), "");
+        }
         let files = files::list_files(&cfg.rec_dir);
         let mut s = self.ctl.status.lock().unwrap();
         s.archive_bytes = files::rec_total(&files);
@@ -608,6 +666,11 @@ impl Supervisor {
     }
 }
 
+/// gsr's stderr says the capture target (monitor) is absent, e.g. `display "DP-1" not found, expected one of: "screen"`.
+fn display_missing(stderr: &str) -> bool {
+    stderr.contains("not found") && (stderr.contains("display") || stderr.contains("monitor"))
+}
+
 /// First configured source (each `a|b` part) missing from PipeWire; `None` if all present or unknown/default sources.
 pub fn missing_audio(pactl: &str, tracks: &[String]) -> Option<String> {
     let out = Command::new(pactl)
@@ -633,6 +696,16 @@ pub fn missing_audio(pactl: &str, tracks: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_missing_detects_gsr_message() {
+        assert!(display_missing(
+            r#"gsr error: display "DP-1" not found, expected one of: "screen""#
+        ));
+        assert!(!display_missing(
+            "gsr error: failed to connect to the daemon"
+        ));
+    }
 
     #[test]
     fn gsr_args() {

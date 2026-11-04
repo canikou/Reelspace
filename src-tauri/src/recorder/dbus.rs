@@ -152,52 +152,73 @@ impl Notifier {
             conn: conn.clone(),
             paths: Mutex::new(HashMap::new()),
         });
-        let n2 = n.clone();
-        std::thread::spawn(move || n2.listen());
+        // Subscribe before returning so no signal can slip in ahead of the match rule.
+        match Self::subscribe(&conn) {
+            Ok(iter) => {
+                let n2 = n.clone();
+                std::thread::spawn(move || n2.listen(iter));
+            }
+            Err(e) => eprintln!("reelspace-recorder: notification actions disabled: {e}"),
+        }
         n
     }
 
-    fn listen(&self) {
-        let Ok(rule) = zbus::MatchRule::builder()
+    fn subscribe(conn: &Connection) -> zbus::Result<zbus::blocking::MessageIterator> {
+        let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
-            .interface(NOTIF_DEST)
-            .and_then(|b| b.member("ActionInvoked"))
-            .map(|b| b.build())
-        else {
-            return;
-        };
-        let Ok(iter) = zbus::blocking::MessageIterator::for_match_rule(rule, &self.conn, None)
-        else {
-            return;
-        };
-        for msg in iter.flatten() {
-            let Ok((id, key)) = msg.body().deserialize::<(u32, String)>() else {
-                continue;
+            .interface(NOTIF_DEST)?
+            .member("ActionInvoked")?
+            .build();
+        zbus::blocking::MessageIterator::for_match_rule(rule, conn, None)
+    }
+
+    fn listen(&self, iter: zbus::blocking::MessageIterator) {
+        for msg in iter {
+            let msg = match msg {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("reelspace-recorder: notification signal error: {e}");
+                    continue;
+                }
+            };
+            let (id, key) = match msg.body().deserialize::<(u32, String)>() {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("reelspace-recorder: bad ActionInvoked body: {e}");
+                    continue;
+                }
             };
             let Some(path) = self.paths.lock().unwrap().get(&id).cloned() else {
-                continue;
+                continue; // someone else's notification
             };
             match key.as_str() {
                 "open" => {
-                    let _ = Command::new("reelspace")
+                    if let Err(e) = Command::new("reelspace")
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
-                        .spawn();
+                        .spawn()
+                    {
+                        eprintln!("reelspace-recorder: cannot launch reelspace: {e}");
+                    }
                 }
                 "show" => {
-                    let uri = format!("file://{}", path.display());
-                    let _ = self.conn.call_method(
+                    let uri = url::Url::from_file_path(&path)
+                        .map_or_else(|_| format!("file://{}", path.display()), String::from);
+                    if let Err(e) = self.conn.call_method(
                         Some("org.freedesktop.FileManager1"),
                         "/org/freedesktop/FileManager1",
                         Some("org.freedesktop.FileManager1"),
                         "ShowItems",
                         &(vec![uri], "reelspace"),
-                    );
+                    ) {
+                        eprintln!("reelspace-recorder: ShowItems failed: {e}");
+                    }
                 }
-                _ => {}
+                other => eprintln!("reelspace-recorder: unknown notification action '{other}'"),
             }
         }
+        eprintln!("reelspace-recorder: notification listener stopped");
     }
 
     pub fn notify(
@@ -234,10 +255,15 @@ impl Notifier {
                 -1i32,
             ),
         );
-        if let (Ok(r), Some(p)) = (reply, path) {
-            if let Ok(id) = r.body().deserialize::<u32>() {
-                self.paths.lock().unwrap().insert(id, PathBuf::from(p));
-            }
+        match (reply, path) {
+            (Ok(r), Some(p)) => match r.body().deserialize::<u32>() {
+                Ok(id) => {
+                    self.paths.lock().unwrap().insert(id, PathBuf::from(p));
+                }
+                Err(e) => eprintln!("reelspace-recorder: bad Notify reply: {e}"),
+            },
+            (Err(e), _) => eprintln!("reelspace-recorder: Notify failed: {e}"),
+            _ => {}
         }
     }
 }
@@ -372,4 +398,117 @@ pub fn start(
     conn.request_name(NAME)?;
     watch_focus(conn.clone(), ctl.clone());
     Ok((ctl, conn))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::time::{Duration, Instant};
+
+    /// Private session bus; killed on drop. `None` when dbus-daemon is unavailable.
+    struct Bus(std::process::Child, String);
+    impl Bus {
+        fn start() -> Option<Self> {
+            let mut c = Command::new("dbus-daemon")
+                .args(["--session", "--print-address", "--nofork"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()?;
+            let mut addr = String::new();
+            BufReader::new(c.stdout.take()?).read_line(&mut addr).ok()?;
+            Some(Self(c, addr.trim().to_string()))
+        }
+        fn connect(&self) -> Connection {
+            zbus::blocking::connection::Builder::address(self.1.as_str())
+                .unwrap()
+                .build()
+                .unwrap()
+        }
+    }
+    impl Drop for Bus {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    struct FakeNotifications;
+    #[zbus::interface(name = "org.freedesktop.Notifications")]
+    impl FakeNotifications {
+        #[allow(clippy::too_many_arguments)]
+        fn notify(
+            &self,
+            _app: &str,
+            _replaces: u32,
+            _icon: &str,
+            _summary: &str,
+            _body: &str,
+            _actions: Vec<String>,
+            _hints: HashMap<String, OwnedValue>,
+            _timeout: i32,
+        ) -> u32 {
+            211
+        }
+    }
+
+    struct FakeFileManager(Arc<Mutex<Vec<String>>>);
+    #[zbus::interface(name = "org.freedesktop.FileManager1")]
+    impl FakeFileManager {
+        fn show_items(&self, uris: Vec<String>, _startup_id: &str) {
+            self.0.lock().unwrap().extend(uris);
+        }
+    }
+
+    #[test]
+    fn action_invoked_show_calls_show_items() {
+        let Some(bus) = Bus::start() else {
+            eprintln!("dbus-daemon unavailable; skipping");
+            return;
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let server = bus.connect();
+        server
+            .object_server()
+            .at("/org/freedesktop/Notifications", FakeNotifications)
+            .unwrap();
+        server
+            .object_server()
+            .at(
+                "/org/freedesktop/FileManager1",
+                FakeFileManager(calls.clone()),
+            )
+            .unwrap();
+        server.request_name(NOTIF_DEST).unwrap();
+        server.request_name("org.freedesktop.FileManager1").unwrap();
+
+        let client = bus.connect();
+        let notifier = Notifier::new(client.clone());
+        notifier.notify("s", "b", "i", false, Some("/tmp/a b/clip_1.mp4"));
+        let me = client.unique_name().unwrap().to_owned();
+
+        // GNOME may broadcast or unicast to the Notify caller; both must work.
+        for dest in [None, Some(me.as_str())] {
+            calls.lock().unwrap().clear();
+            server
+                .emit_signal(
+                    dest,
+                    "/org/freedesktop/Notifications",
+                    NOTIF_DEST,
+                    "ActionInvoked",
+                    &(211u32, "show"),
+                )
+                .unwrap();
+            let t = Instant::now();
+            while calls.lock().unwrap().is_empty() && t.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(
+                *calls.lock().unwrap(),
+                vec!["file:///tmp/a%20b/clip_1.mp4".to_string()],
+                "dest {dest:?}"
+            );
+        }
+    }
 }

@@ -35,7 +35,7 @@ export function osdFor(signal, args, lastState) {
         // Paused stops gpu-screen-recorder entirely, so say plainly that clips won't work.
         if (state === 'paused')
             return ['media-playback-pause-symbolic', 'Recorder paused · clips off'];
-        if (state === 'recording' && lastState === 'paused')
+        if ((state === 'recording' || state === 'replay') && lastState === 'paused')
             return ['media-record-symbolic', 'Recorder resumed'];
         return null;
     }

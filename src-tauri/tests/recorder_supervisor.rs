@@ -201,9 +201,7 @@ fn rolling_manual_session_clip_and_shutdown() {
 
     // capture-param change restarts gsr
     rig.switch(|c| c.fps = 30);
-    wait("gsr restart", || {
-        rig.pids() == 2 && rig.state() == "recording"
-    });
+    wait("gsr restart", || rig.pids() == 2 && rig.state() == "replay");
 
     let root = rig.root.clone();
     rig.stop();
@@ -296,5 +294,56 @@ fn invalid_reload_keeps_last_good_config() {
             .contains("config rejected")
     });
     assert_eq!(rig.ctl.cfg().min_free_gb, 5);
+    rig.stop();
+}
+
+#[test]
+fn reload_retries_immediately_and_replay_state() {
+    // waiting_mount backs off 60 s; a reload that fixes the config must not wait it out
+    let rig = Rig::new(|c| c.require_mountpoint = true, "1\\tRec_Mix\\tPipeWire\\n");
+    wait("waiting_mount", || rig.state() == "waiting_mount");
+    rig.switch(|c| {
+        c.require_mountpoint = false;
+        c.mode = Mode::Session; // no game running: replay buffer only
+    });
+    wait("replay", || rig.state() == "replay");
+    assert!(!rig.marker());
+    rig.stop();
+}
+
+#[test]
+fn missing_display_waits_quietly() {
+    let rig = Rig::new(
+        |c| {
+            let bin = c.rec_dir.parent().unwrap().join("bin");
+            script(
+                &bin.join("gsr-nodisplay"),
+                "echo 'gsr error: display \"DP-1\" not found, expected one of: \"screen\"' >&2; exit 1",
+            );
+            c.gsr_path = bin.join("gsr-nodisplay").display().to_string();
+        },
+        "1\\tRec_Mix\\tPipeWire\\n",
+    );
+    wait("waiting_display", || rig.state() == "waiting_display");
+    assert!(rig.ctl.status.lock().unwrap().detail.contains("not found"));
+    assert!(!rig
+        .sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| matches!(e, Event::Critical { .. })));
+    rig.stop();
+}
+
+#[test]
+fn save_clip_while_paused_is_refused() {
+    let rig = Rig::new(|_| {}, "1\\tRec_Mix\\tPipeWire\\n");
+    wait("recording", || rig.state() == "recording");
+    rig.ctl.paused.store(true, SeqCst);
+    assert_eq!(reelspace_lib::recorder::clip::save_clip(&rig.ctl, 30), "");
+    assert!(rig.sink.0.lock().unwrap().iter().any(|e| matches!(
+        e, Event::ClipFailed { reason, .. } if reason.starts_with("Recorder is paused")
+    )));
     rig.stop();
 }
