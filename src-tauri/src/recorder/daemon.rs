@@ -378,6 +378,8 @@ impl Supervisor {
         self.child = Some(child);
         self.child_started = Instant::now();
         self.disk_blocked = false;
+        // gsr is up: earlier start failures (waiting_display etc.) are no longer current
+        self.ctl.status.lock().unwrap().last_error.clear();
         self.ctl.set_state(self.run_state(cfg), "");
     }
 
@@ -710,6 +712,7 @@ mod tests {
     #[test]
     fn gsr_args() {
         let cfg = Config {
+            capture: "DP-1".into(),
             audio_tracks: vec!["Rec_Mix".into(), "Mic|Voice".into()],
             rec_dir: "/r".into(),
             ..Config::default()

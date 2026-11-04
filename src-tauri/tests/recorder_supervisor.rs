@@ -260,7 +260,7 @@ fn guards_block_start() {
     rig.stop();
 
     // audio source missing
-    let rig = Rig::new(|_| {}, "");
+    let rig = Rig::new(|c| c.audio_tracks = vec!["Rec_Mix".into()], "");
     wait("waiting_audio", || rig.state() == "waiting_audio");
     assert_eq!(rig.pids(), 0);
     rig.stop();
@@ -333,6 +333,20 @@ fn missing_display_waits_quietly() {
         .unwrap()
         .iter()
         .any(|e| matches!(e, Event::Critical { .. })));
+    assert!(!rig.ctl.status.lock().unwrap().last_error.is_empty());
+
+    // display back: gsr starts and the stale failure is cleared
+    rig.switch(|c| {
+        c.gsr_path = c
+            .rec_dir
+            .parent()
+            .unwrap()
+            .join("bin/gpu-screen-recorder")
+            .display()
+            .to_string()
+    });
+    wait("recording", || rig.state() == "recording");
+    assert_eq!(rig.ctl.status.lock().unwrap().last_error, "");
     rig.stop();
 }
 
