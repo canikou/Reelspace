@@ -31,6 +31,11 @@ export function osdFor(signal, args, lastState) {
             return ['dialog-warning-symbolic', detail ? `Recorder error: ${detail}` : 'Recorder error'];
         if (state === 'stopped')
             return ['media-playback-stop-symbolic', 'Recorder stopped'];
+        // Paused stops gpu-screen-recorder entirely, so say plainly that clips won't work.
+        if (state === 'paused')
+            return ['media-playback-pause-symbolic', 'Recorder paused · clips off'];
+        if (state === 'recording' && lastState === 'paused')
+            return ['media-record-symbolic', 'Recorder resumed'];
         return null;
     }
     default:

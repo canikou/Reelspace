@@ -14,6 +14,8 @@ eq(osdFor('SessionStarted', ['Once Human', '/s.mkv'], null)[1], 'Recording Once 
 eq(osdFor('SessionEnded', ['Once Human', '/s.mkv', 5400], null)[1], 'Session saved 1:30:00 · Once Human', 'session end');
 eq(osdFor('StateChanged', ['error', 'disk floor reached'], 'recording')[1], 'Recorder error: disk floor reached', 'error');
 eq(osdFor('StateChanged', ['error', 'disk floor reached'], 'error'), null, 'repeated state deduped');
-eq(osdFor('StateChanged', ['recording', ''], 'paused'), null, 'normal states silent');
+eq(osdFor('StateChanged', ['recording', ''], 'waiting_audio'), null, 'normal states silent');
+eq(osdFor('StateChanged', ['paused', ''], 'recording')[1], 'Recorder paused · clips off', 'paused');
+eq(osdFor('StateChanged', ['recording', ''], 'paused')[1], 'Recorder resumed', 'resumed');
 eq(osdFor('ConfigChanged', [], null), null, 'unknown signals silent');
 print('osd tests passed');
