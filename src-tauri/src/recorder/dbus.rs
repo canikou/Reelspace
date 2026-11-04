@@ -221,8 +221,10 @@ impl Notifier {
         eprintln!("reelspace-recorder: notification listener stopped");
     }
 
+    /// Never blocks: callers include D-Bus method handlers, and a blocking call on
+    /// `conn` from inside its own executor deadlocks the whole service.
     pub fn notify(
-        &self,
+        self: &Arc<Self>,
         summary: &str,
         body: &str,
         icon: &str,
@@ -239,6 +241,25 @@ impl Notifier {
         } else {
             vec![]
         };
+        let (n, icon, summary, body) = (
+            self.clone(),
+            icon.to_string(),
+            summary.to_string(),
+            body.to_string(),
+        );
+        let path = path.map(str::to_string);
+        std::thread::spawn(move || n.send(&icon, &summary, &body, actions, hints, path));
+    }
+
+    fn send(
+        &self,
+        icon: &str,
+        summary: &str,
+        body: &str,
+        actions: Vec<&str>,
+        hints: HashMap<&str, Value>,
+        path: Option<String>,
+    ) {
         let reply = self.conn.call_method(
             Some(NOTIF_DEST),
             NOTIF_PATH,
@@ -386,7 +407,15 @@ pub fn start(
     cfg_path: PathBuf,
     sock: PathBuf,
 ) -> zbus::Result<(Arc<Control>, Connection)> {
-    let conn = Connection::session()?;
+    start_on(Connection::session()?, cfg, cfg_path, sock)
+}
+
+fn start_on(
+    conn: Connection,
+    cfg: super::config::Config,
+    cfg_path: PathBuf,
+    sock: PathBuf,
+) -> zbus::Result<(Arc<Control>, Connection)> {
     let flags = Arc::new(Flags::default());
     let sink = Arc::new(Outputs {
         conn: conn.clone(),
@@ -486,6 +515,10 @@ mod tests {
         let client = bus.connect();
         let notifier = Notifier::new(client.clone());
         notifier.notify("s", "b", "i", false, Some("/tmp/a b/clip_1.mp4"));
+        let t = Instant::now();
+        while notifier.paths.lock().unwrap().is_empty() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let me = client.unique_name().unwrap().to_owned();
 
         // GNOME may broadcast or unicast to the Notify caller; both must work.
@@ -510,5 +543,70 @@ mod tests {
                 "dest {dest:?}"
             );
         }
+    }
+
+    /// Regression: SaveClip while paused emitted Notify synchronously inside the
+    /// method handler and deadlocked the daemon's connection.
+    #[test]
+    fn save_clip_while_paused_does_not_deadlock() {
+        let Some(bus) = Bus::start() else {
+            eprintln!("dbus-daemon unavailable; skipping");
+            return;
+        };
+        let server = bus.connect();
+        server
+            .object_server()
+            .at("/org/freedesktop/Notifications", FakeNotifications)
+            .unwrap();
+        server.request_name(NOTIF_DEST).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ctl, _conn) = start_on(
+            bus.connect(),
+            super::super::config::Config::default(),
+            dir.path().join("recorder.json"),
+            dir.path().join("gsr.sock"),
+        )
+        .unwrap();
+        ctl.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let client = bus.connect();
+        let call = |member: &str| {
+            let (c, m) = (client.clone(), member.to_string());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(
+                    c.call_method(
+                        Some(NAME),
+                        PATH,
+                        Some("org.reelspace.Recorder1"),
+                        m.as_str(),
+                        &(),
+                    )
+                    .is_ok(),
+                );
+            });
+            rx.recv_timeout(Duration::from_secs(2))
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = client.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                c.call_method(
+                    Some(NAME),
+                    PATH,
+                    Some("org.reelspace.Recorder1"),
+                    "SaveClip",
+                    &(0u32,),
+                )
+                .is_ok(),
+            );
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok(true),
+            "SaveClip hung"
+        );
+        assert_eq!(call("Status"), Ok(true), "Status hung after SaveClip");
     }
 }
