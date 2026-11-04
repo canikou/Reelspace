@@ -141,6 +141,12 @@ export function RecorderSettings() {
           {CODECS.map((codec) => <option key={codec} value={codec}>{codec}</option>)}
         </select>
       </label>
+      <label>Replay buffer storage
+        <select value={config.replay_storage} onChange={(event) => set({ replay_storage: event.target.value as "disk" | "ram" })}>
+          <option value="disk">Disk (saves memory)</option>
+          <option value="ram">Memory (less disk wear)</option>
+        </select>
+      </label>
       <label>Audio tracks
         <textarea rows={3} value={lists.audio} onChange={(event) => setLists({ ...lists, audio: event.target.value })} placeholder="One audio source per line" />
       </label>

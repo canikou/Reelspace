@@ -65,6 +65,8 @@ pub struct Config {
     pub fps: u32,
     pub capture: String,
     pub codec: String,
+    /// gsr replay buffer: "disk" (segments in rec_dir/.replay, saves RAM) or "ram".
+    pub replay_storage: String,
     pub audio_tracks: Vec<String>,
     pub require_mountpoint: bool,
     pub min_free_gb: u64,
@@ -97,6 +99,7 @@ impl Default for Config {
             fps: 60,
             capture: "DP-1".into(),
             codec: "h264".into(),
+            replay_storage: "disk".into(),
             audio_tracks: vec!["Rec_Mix".into()],
             require_mountpoint: true,
             min_free_gb: 50,
@@ -163,6 +166,12 @@ impl Config {
         .contains(&self.codec.as_str())
         {
             return Err(format!("unsupported codec '{}'", self.codec));
+        }
+        if !["disk", "ram"].contains(&self.replay_storage.as_str()) {
+            return Err(format!(
+                "replay_storage must be 'disk' or 'ram', got '{}'",
+                self.replay_storage
+            ));
         }
         if self.audio_tracks.is_empty() || self.audio_tracks.iter().any(|t| t.trim().is_empty()) {
             return e("audio_tracks must contain at least one non-empty entry");
@@ -265,6 +274,11 @@ mod tests {
             ..Config::default()
         };
         assert!(c.validate().is_err());
+        c = Config {
+            replay_storage: "tmpfs".into(),
+            ..Config::default()
+        };
+        assert!(c.validate().unwrap_err().contains("replay_storage"));
         c = Config {
             audio_tracks: vec![],
             ..Config::default()

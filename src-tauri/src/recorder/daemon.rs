@@ -95,7 +95,11 @@ fn args_for(cfg: &Config, sock: &std::path::Path) -> Vec<String> {
     }
     a.extend(["-ac", "aac", "-ab", "192", "-v", "no", "-r"].map(String::from));
     a.push(cfg.clip_sec.to_string());
-    a.extend(["-replay-storage", "ram", "-o"].map(String::from));
+    a.extend([
+        "-replay-storage".into(),
+        cfg.replay_storage.clone(),
+        "-o".into(),
+    ]);
     a.push(cfg.rec_dir.join(".replay").display().to_string());
     a.push("-ro".into());
     a.push(cfg.rec_dir.display().to_string());
@@ -197,8 +201,9 @@ impl Supervisor {
         match Config::load(&self.ctl.cfg_path) {
             Ok(new) => {
                 let old = self.cfg();
-                let restart =
-                    old.capture_params() != new.capture_params() || old.gsr_path != new.gsr_path;
+                let restart = old.capture_params() != new.capture_params()
+                    || old.replay_storage != new.replay_storage
+                    || old.gsr_path != new.gsr_path;
                 self.ctl.set_cfg(new);
                 if restart && self.child.is_some() {
                     self.shutdown_gsr(Duration::from_secs(35));
@@ -637,6 +642,6 @@ mod tests {
             ..Config::default()
         };
         let a = args_for(&cfg, std::path::Path::new("/run/s.sock")).join(" ");
-        assert!(a.starts_with("-w DP-1 -f 60 -k h264 -bm cbr -q 20000 -c mkv -a Rec_Mix -a Mic|Voice -ac aac -ab 192 -v no -r 300 -replay-storage ram -o /r/.replay -ro /r -ipc /run/s.sock"));
+        assert!(a.starts_with("-w DP-1 -f 60 -k h264 -bm cbr -q 20000 -c mkv -a Rec_Mix -a Mic|Voice -ac aac -ab 192 -v no -r 300 -replay-storage disk -o /r/.replay -ro /r -ipc /run/s.sock"));
     }
 }

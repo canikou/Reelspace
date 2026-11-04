@@ -211,6 +211,7 @@ export interface RecorderConfig {
   fps: number;
   capture: string;
   codec: string;
+  replay_storage: "disk" | "ram";
   audio_tracks: string[];
   require_mountpoint: boolean;
   min_free_gb: number;

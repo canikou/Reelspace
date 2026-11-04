@@ -8,7 +8,7 @@ Session bus · name `org.reelspace.Recorder` · path `/org/reelspace/Recorder` �
 | `SaveClip` | `(u seconds) -> s` | Returns at once with a job id; `""` if a save is already running (double-press ignored). `0` = configured `clip_sec`. |
 | `Status` | `() -> a{sv}` | Keys: `state` (`recording\|paused\|waiting_mount\|waiting_audio\|error\|stopped`), `detail`, `mode`, `replay_seconds` (u), `archive_bytes` (t), `cap_bytes` (t), `free_bytes` (t), `min_free_bytes` (t), `archive_hours_estimate` (d), `current_chunk_started` (x, unix s, 0 = none), `session_game`, `last_error`. |
 | `Pause` / `Resume` | `()` | Pause stops gpu-screen-recorder entirely (no replay buffer either). |
-| `ReloadConfig` | `()` | Re-reads `~/.config/reelspace/recorder.json`. Invalid config is rejected (last good kept, `last_error` set). gsr restarts only if capture/fps/codec/bitrate/audio/clip_sec/rec_dir changed. |
+| `ReloadConfig` | `()` | Re-reads `~/.config/reelspace/recorder.json`. Invalid config is rejected (last good kept, `last_error` set). gsr restarts only if capture/fps/codec/bitrate/audio/clip_sec/rec_dir/replay_storage changed. |
 | `DeleteRollingArchive` | `() -> t` | Deletes every `rec_YYYY-MM-DD_HH-MM-SS.mkv` in `rec_dir` (never anything else); returns bytes freed. |
 
 ## Signals
