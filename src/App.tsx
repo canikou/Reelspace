@@ -4,6 +4,7 @@ import { CollectionPickerDialog } from "./components/CollectionPickerDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { GamePickerDialog } from "./components/GamePickerDialog";
 import { PlayerModal } from "./components/PlayerModal";
+import { RecorderToggle } from "./components/RecorderToggle";
 import { SetupPrompt } from "./components/SetupPrompt";
 import { Sidebar, type PageKey } from "./components/Sidebar";
 import { TextEditorDialog } from "./components/TextEditorDialog";
@@ -252,6 +253,7 @@ export function App() {
         <header className="topbar">
           <h1>{titleFor(page)}</h1>
           <div className="topbar-actions">
+            <RecorderToggle onError={showError} />
             {busy ? <span className="activity-pill"><AppIcon name="refresh" size={14} className="spin" /> Scanning</span> : null}
             {recorders[0] ? <button className="recorder-button" onClick={() => api.launchRecordingApp(recorders[0].id).catch(showError)} aria-label={`Open ${recorders[0].name}`} title={`Open ${recorders[0].name}`}><AppIcon name="recorder" size={17} /><span>{recorders[0].name}</span></button> : null}
             <button className="icon-button" onClick={() => runUpdateCheck(true)} disabled={updateState.phase === "checking" || updateState.phase === "downloading"} aria-label="Check for updates" title="Check for updates">
