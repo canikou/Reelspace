@@ -97,11 +97,11 @@ impl Default for Config {
             clip_sec: 300,
             bitrate_kbps: 20000,
             fps: 60,
-            capture: "DP-1".into(),
+            capture: "screen".into(),
             codec: "h264".into(),
             replay_storage: "disk".into(),
-            audio_tracks: vec!["Rec_Mix".into()],
-            require_mountpoint: true,
+            audio_tracks: vec!["default_output".into()],
+            require_mountpoint: false,
             min_free_gb: 50,
             session: SessionConfig::default(),
             sounds: true,
@@ -246,7 +246,7 @@ mod tests {
         let c = Config::default();
         assert!(c.validate().is_ok());
         assert_eq!(c.mode, Mode::Rolling);
-        assert_eq!(c.audio_tracks, vec!["Rec_Mix"]);
+        assert_eq!(c.audio_tracks, vec!["default_output"]);
         assert_eq!(c.clip_dir(), c.rec_dir.join("Clips"));
     }
 

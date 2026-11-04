@@ -1001,8 +1001,13 @@ mod tests {
     }
 }
 
-/// The background recorder daemon only exists on Linux; the UI hides its section elsewhere.
+/// The recorder daemon ships beside the app binary in the deb/rpm/Arch packages only
+/// (not Windows or the AppImage); the UI hides its section when it is absent.
 #[tauri::command]
 pub fn recorder_supported() -> bool {
     cfg!(target_os = "linux")
+        && std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join("reelspace-recorder").is_file()))
+            .unwrap_or(false)
 }

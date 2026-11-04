@@ -120,6 +120,11 @@ impl Control {
     pub fn set_state(&self, state: &str, detail: &str) {
         let mut s = self.status.lock().unwrap();
         let changed = s.state != state || s.detail != detail;
+        let running = |st: &str| st == "recording" || st == "replay";
+        // gsr just came up again: drop the stale failure, but keep clip errors raised while running.
+        if running(state) && !running(&s.state) {
+            s.last_error.clear();
+        }
         s.state = state.into();
         s.detail = detail.into();
         if state == "error" {
@@ -170,6 +175,23 @@ impl Sink for VecSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_error_clears_when_recording_resumes() {
+        let c = Control::new(
+            Config::default(),
+            "/x".into(),
+            "/s".into(),
+            Arc::new(VecSink::default()),
+            Arc::default(),
+        );
+        c.set_state("error", "display gone");
+        c.set_state("recording", "");
+        assert_eq!(c.status.lock().unwrap().last_error, "");
+        c.status.lock().unwrap().last_error = "clip failed".into();
+        c.set_state("recording", "chunk 2");
+        assert_eq!(c.status.lock().unwrap().last_error, "clip failed");
+    }
 
     #[test]
     fn double_press_ignored_and_limiter() {
