@@ -95,7 +95,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 pnpm tauri:build
 ```
 
-On Linux, replace the FFmpeg step with `./scripts/prepare-ffmpeg.sh`. For an unsigned local package add `--config '{"bundle":{"createUpdaterArtifacts":false}}'` to the `tauri:build` command. On Arch: `sudo pacman -S --needed webkit2gtk-4.1 librsvg base-devel`.
+On Linux, replace the FFmpeg step with `./scripts/prepare-ffmpeg.sh`. For an unsigned local package run `pnpm tauri:build --config src-tauri/tauri.unsigned.conf.json`. On Arch: `sudo pacman -S --needed webkit2gtk-4.1 librsvg base-devel`.
 
 Updater-enabled packaging requires `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The repository's `build-setup.bat` loads the maintainer's DPAPI-protected local key automatically; other source builders should provide their own Tauri updater key when producing an installer.
 

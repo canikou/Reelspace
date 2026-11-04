@@ -28,9 +28,8 @@ export class ErrorBoundary extends Component<Props, State> {
     return (
       <main className="recovery-screen" role="alert">
         <div>
-          <p className="eyebrow">Reelspace recovered a display failure</p>
           <h1>Your media files were not changed</h1>
-          <p>The failing screen was isolated. Reload Reelspace to rebuild its in-memory view from the local library.</p>
+          <p>Reelspace recovered from a display failure and isolated the failing screen. Reload to rebuild its view from the local library.</p>
           <button onClick={() => window.location.reload()}>Reload Reelspace</button>
         </div>
       </main>

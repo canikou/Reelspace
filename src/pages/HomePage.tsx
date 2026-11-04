@@ -36,8 +36,8 @@ export function HomePage({
           ) : null}
         </section>
       ) : null}
-      <MediaRail title="Latest Raw" items={rawItems.slice(0, 12)} actions={actions} />
-      <MediaRail title="Latest Clips" items={clipItems.slice(0, 12)} actions={actions} />
+      <MediaRail title="Latest recordings" items={rawItems.slice(0, 12)} actions={actions} empty="No recordings yet." />
+      <MediaRail title="Latest clips" items={clipItems.slice(0, 12)} actions={actions} empty="No clips yet. Open a recording and choose Create clip." />
     </div>
   );
 }

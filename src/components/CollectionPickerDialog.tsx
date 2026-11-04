@@ -47,7 +47,7 @@ export function CollectionPickerDialog({
         <button className="create-row" onClick={onCreate} disabled={busyId !== null}>
           <AppIcon name="add" size={17} /> <span>New collection</span>
         </button>
-        {error ? <div className="inline-error">{error}</div> : null}
+        {error ? <div className="inline-error" role="alert">{error}</div> : null}
       </div>
     </Dialog>
   );

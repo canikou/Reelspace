@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { Dialog } from "./Dialog";
+import { normalizeAppError } from "../lib/api";
 import { AppIcon } from "./icons";
 
 export function TextEditorDialog({
@@ -32,7 +33,7 @@ export function TextEditorDialog({
     try {
       await onSave(value);
     } catch (reason) {
-      setError(String(reason));
+      setError(normalizeAppError(reason).message);
     } finally {
       inFlight.current = false;
       setBusy(false);

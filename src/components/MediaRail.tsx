@@ -1,7 +1,7 @@
 import { MediaCard, type MediaActions } from "./MediaCard";
 import type { MediaItem } from "../lib/types";
 
-export function MediaRail({ title, items, actions }: { title: string; items: MediaItem[]; actions: MediaActions }) {
+export function MediaRail({ title, items, actions, empty = "Nothing here yet." }: { title: string; items: MediaItem[]; actions: MediaActions; empty?: string }) {
   return (
     <section className="rail-section">
       <div className="section-title">
@@ -13,7 +13,7 @@ export function MediaRail({ title, items, actions }: { title: string; items: Med
           {items.slice(0, 12).map((item) => <MediaCard key={item.id} item={item} actions={actions} />)}
         </div>
       ) : (
-        <div className="empty-state compact">Nothing here yet.</div>
+        <div className="empty-state compact">{empty}</div>
       )}
     </section>
   );

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { AppIcon, FrameStackMark } from "../components/icons";
 import { api, normalizeAppError } from "../lib/api";
 import { pickDiagnosticsExport, pickFolder, pickLibraryDataExport, pickLibraryDataImport } from "../lib/dialog";
@@ -46,6 +47,7 @@ export function SettingsPage({
   const [error, setError] = useState<string | null>(null);
   const [dataBusy, setDataBusy] = useState<"export" | "import" | null>(null);
   const [dataStatus, setDataStatus] = useState<string | null>(null);
+  const [pendingImport, setPendingImport] = useState<string | null>(null);
   const saveInFlight = useRef(false);
 
   useEffect(() => {
@@ -88,7 +90,7 @@ export function SettingsPage({
         pauseUploadsWhileRecording
       });
     } catch (reason) {
-      setError(String(reason));
+      setError(normalizeAppError(reason).message);
     } finally {
       saveInFlight.current = false;
       setBusy(false);
@@ -136,7 +138,16 @@ export function SettingsPage({
     try {
       const path = await pickLibraryDataImport();
       if (!path) return;
-      if (!window.confirm("Import this Reelspace data archive? Tags and collection membership will be merged. Existing notes are preserved when they conflict.")) return;
+      setPendingImport(path);
+    } catch (reason) {
+      setError(normalizeAppError(reason).message);
+    }
+  }
+
+  async function runImport(path: string) {
+    setError(null);
+    setDataStatus(null);
+    try {
       setDataBusy("import");
       const summary = await onImportData(path);
       const unresolved = summary.unmatchedItems ? ` ${summary.unmatchedItems} reference${summary.unmatchedItems === 1 ? " was" : "s were"} not matched to a local file.` : "";
@@ -203,8 +214,8 @@ export function SettingsPage({
           <span>{snapshot.ffmpeg.message}</span>
           <details>
             <summary>Tool paths</summary>
-            <code>{snapshot.ffmpeg.ffmpegPath ?? "ffmpeg.exe not found"}</code>
-            <code>{snapshot.ffmpeg.ffprobePath ?? "ffprobe.exe not found"}</code>
+            <code>{snapshot.ffmpeg.ffmpegPath ?? "ffmpeg not found"}</code>
+            <code>{snapshot.ffmpeg.ffprobePath ?? "ffprobe not found"}</code>
           </details>
         </div>
       </section>
@@ -213,7 +224,7 @@ export function SettingsPage({
         <label>
           Theme
           <select value={theme} onChange={(event) => setTheme(event.target.value as "system" | "dark" | "light")}>
-            <option value="system">Use Windows setting</option>
+            <option value="system">Use system setting</option>
             <option value="dark">Dark</option>
             <option value="light">Light</option>
           </select>
@@ -243,7 +254,7 @@ export function SettingsPage({
       <section className="settings-panel archive-account-panel">
         <h2>YouTube archive</h2>
         {archiveAccount ? <><div className="account-state"><AppIcon name="archive" size={18} /><div><strong>{archiveAccount.displayName}</strong><span>Connected · private uploads only</span></div></div><button className="secondary-button" disabled={youtubeBusy} onClick={async () => { setYouTubeBusy(true); setError(null); try { await onDisconnectYouTube(); } catch (reason) { setError(normalizeAppError(reason).message); } finally { setYouTubeBusy(false); } }}>Disconnect YouTube</button></> : <>
-          <p className="muted">Connect your Google account in the browser. Reelspace requests access only for private YouTube archival and stores your sign-in tokens in Windows Credential Manager.</p>
+          <p className="muted">Connect your Google account in the browser. Reelspace requests access only for private YouTube archival and stores your sign-in tokens in the system credential store.</p>
           <button className="primary-button" disabled={youtubeBusy} onClick={async () => { setYouTubeBusy(true); setError(null); try { await onConnectYouTube(); } catch (reason) { setError(normalizeAppError(reason).message); } finally { setYouTubeBusy(false); } }}><AppIcon name="archive" size={17} />{youtubeBusy ? "Waiting for Google…" : "Connect YouTube"}</button>
         </>}
       </section>
@@ -263,7 +274,7 @@ export function SettingsPage({
       <section className="settings-panel">
         <h2>About</h2>
         <div className="about-brand"><span><FrameStackMark size={44} /></span><div><strong>Reelspace {snapshot.version}</strong><small>Frame Stack alpha</small></div></div>
-        <p className="muted">Local-first Windows alpha. No analytics or automatic crash uploads.</p>
+        <p className="muted">Local-first desktop alpha. No analytics or automatic crash uploads.</p>
       </section>
       <section className="settings-panel">
         <h2>Diagnostics and repair</h2>
@@ -272,6 +283,18 @@ export function SettingsPage({
         <button className="secondary-button" onClick={async () => { setMaintenanceStatus("Repairing library…"); try { await api.scanSources(); await api.repairThumbnails(); const summary = await api.repairLibrary(); setMaintenanceStatus(`Repair complete: ${summary.missingLocalFiles} missing local, ${summary.preservedRemoteOnlyItems} preserved remote-only.`); } catch (reason) { setError(normalizeAppError(reason).message); setMaintenanceStatus(null); } }}><AppIcon name="repair" size={17} /> Refresh and repair library</button>
         {maintenanceStatus ? <p className="data-status">{maintenanceStatus}</p> : null}
       </section>
+      {pendingImport ? (
+        <ConfirmDialog
+          title="Import library data?"
+          description="Tags and collection membership will be merged. Existing notes are preserved when they conflict."
+          detail={pendingImport}
+          tone="neutral"
+          confirmLabel="Import"
+          busyLabel="Importing"
+          onClose={() => setPendingImport(null)}
+          onConfirm={async () => { const path = pendingImport; setPendingImport(null); await runImport(path); }}
+        />
+      ) : null}
       <div className="settings-actions">
         {error ? <div className="inline-error">{error}</div> : null}
         <button className="primary-button" onClick={save} disabled={busy} title="Save settings">

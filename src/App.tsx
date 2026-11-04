@@ -125,7 +125,10 @@ export function App() {
         setUpdateState(await downloadUpdate(setUpdateState));
       }
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : "The update channel could not be reached";
+      const raw = reason instanceof Error ? reason.message : String(reason ?? "");
+      const message = /fallback platforms/i.test(raw)
+        ? "In-app updates are only available for the installer and AppImage builds. Download the newer package from GitHub Releases."
+        : raw || "The update channel could not be reached";
       setUpdateState(manual ? { phase: "error", version: snapshot?.version, error: message } : { phase: "idle" });
     }
   }, [snapshot?.settings.automaticallyDownloadUpdates, snapshot?.settings.includePrereleaseUpdates, snapshot?.version]);
@@ -247,10 +250,7 @@ export function App() {
       <Sidebar page={page} onPageChange={(next) => { setPage(next); if (next !== "collections") setSelectedCollection(null); }} />
       <main className="workspace">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">Reelspace</p>
-            <h1>{titleFor(page)}</h1>
-          </div>
+          <h1>{titleFor(page)}</h1>
           <div className="topbar-actions">
             {busy ? <span className="activity-pill"><AppIcon name="refresh" size={14} className="spin" /> Scanning</span> : null}
             {recorders[0] ? <button className="recorder-button" onClick={() => api.launchRecordingApp(recorders[0].id).catch(showError)} aria-label={`Open ${recorders[0].name}`} title={`Open ${recorders[0].name}`}><AppIcon name="recorder" size={17} /><span>{recorders[0].name}</span></button> : null}
@@ -262,8 +262,8 @@ export function App() {
             </button>
           </div>
         </header>
-        {error ? <div className="error-banner"><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error" title="Dismiss error"><AppIcon name="close" size={16} /></button></div> : null}
-        {notice ? <div className="toast"><AppIcon name="success" size={17} /> {notice}</div> : null}
+        {error ? <div className="error-banner" role="alert"><span>{error}</span>{!snapshot ? <button className="secondary-button" onClick={() => { setError(null); refresh().catch(showError); }}>Try again</button> : null}<button onClick={() => setError(null)} aria-label="Dismiss error" title="Dismiss error"><AppIcon name="close" size={16} /></button></div> : null}
+        {notice ? <div className="toast" role="status"><AppIcon name="success" size={17} /> {notice}</div> : null}
         <UpdatePrompt
           state={updateState}
           activeWork={busy || trimming !== null || Boolean(snapshot?.activeMediaWork)}
@@ -280,10 +280,10 @@ export function App() {
           <button className="setup-reminder" onClick={chooseInitialSourceFolder}><AppIcon name="add" size={18} /><span>Add a capture folder to begin</span></button>
         ) : null}
         {page === "home" && snapshot ? <HomePage snapshot={snapshot} rawItems={rawItems} clipItems={clipItems} actions={actions} onCleanup={setPendingDelete} /> : null}
-        {page === "gallery" ? <GalleryPage items={rawItems} actions={actions} /> : null}
-        {page === "clips" ? <ClipsPage items={clipItems} actions={actions} highlightedId={highlightedClipId} /> : null}
-        {page === "games" ? <GamesPage games={games} onCreate={async (name) => { setGames(await api.createGame(name)); setNotice("Game created"); }} onRename={async (game, name) => { setGames(await api.renameGame(game.id, name)); await refresh(); setNotice("Game renamed and alias preserved"); }} onMerge={async (source, target) => { setGames(await api.mergeGames(source.id, target.id)); await refresh(); setNotice("Game classifications merged"); }} /> : null}
-        {page === "collections" ? (
+        {snapshot && page === "gallery" ? <GalleryPage items={rawItems} actions={actions} /> : null}
+        {snapshot && page === "clips" ? <ClipsPage items={clipItems} actions={actions} highlightedId={highlightedClipId} /> : null}
+        {snapshot && page === "games" ? <GamesPage games={games} onCreate={async (name) => { setGames(await api.createGame(name)); setNotice("Game created"); }} onRename={async (game, name) => { setGames(await api.renameGame(game.id, name)); await refresh(); setNotice("Game renamed and alias preserved"); }} onMerge={async (source, target) => { setGames(await api.mergeGames(source.id, target.id)); await refresh(); setNotice("Game classifications merged"); }} /> : null}
+        {snapshot && page === "collections" ? (
           <CollectionsPage
             collections={collections}
             selected={selectedCollection}
@@ -302,7 +302,7 @@ export function App() {
             }}
           />
         ) : null}
-        {page === "archive" ? <ArchivePage jobs={uploadJobs} onControl={async (action, jobId) => { setUploadJobs(await api.controlUploadQueue(action, jobId)); await refresh(); }} /> : null}
+        {snapshot && page === "archive" ? <ArchivePage jobs={uploadJobs} onControl={async (action, jobId) => { setUploadJobs(await api.controlUploadQueue(action, jobId)); await refresh(); }} /> : null}
         {page === "settings" && snapshot ? (
           <SettingsPage
             snapshot={snapshot}
@@ -421,10 +421,12 @@ export function App() {
       {pendingLocalRemoval ? (
         <ConfirmDialog
           title="Remove local copy?"
-          description="The verified remote archive will remain available. The local file moves to the Windows Recycle Bin."
+          description="The verified remote archive will remain available. The local file moves to the system trash."
           detail={pendingLocalRemoval.path}
+          confirmLabel="Remove local copy"
+          busyLabel="Removing"
           onClose={() => setPendingLocalRemoval(null)}
-          onConfirm={async () => { await api.removeLocalCopy(pendingLocalRemoval.id); setPendingLocalRemoval(null); await refresh(); setNotice("Local copy moved to the Recycle Bin"); }}
+          onConfirm={async () => { await api.removeLocalCopy(pendingLocalRemoval.id); setPendingLocalRemoval(null); await refresh(); setNotice("Local copy moved to the trash"); }}
         />
       ) : null}
       {pendingRemoteRemoval ? (

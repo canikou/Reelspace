@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { mediaSrc } from "../lib/api";
 import { formatBytes, formatDuration, formatShortDate } from "../lib/format";
 import type { MediaItem } from "../lib/types";
@@ -32,6 +32,8 @@ export function MediaCard({
   highlighted?: boolean;
 }) {
   const cardRef = useRef<HTMLElement | null>(null);
+  const menuRef = useRef<HTMLDetailsElement | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const thumbnailSrc = mediaSrc(item.thumbnailPath);
   const availability = (item.availability ?? "localOnly") as AvailabilityState;
   const detail = [
@@ -44,6 +46,21 @@ export function MediaCard({
   useEffect(() => {
     if (highlighted) cardRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [highlighted]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = () => { if (menuRef.current) menuRef.current.open = false; };
+    const onPointerDown = (event: PointerEvent) => { if (!menuRef.current?.contains(event.target as Node)) close(); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      close();
+      menuRef.current?.querySelector("summary")?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => { document.removeEventListener("pointerdown", onPointerDown); document.removeEventListener("keydown", onKeyDown, true); };
+  }, [menuOpen]);
 
   return (
     <article ref={cardRef} className={`media-card ${view}${highlighted ? " highlighted" : ""}`}>
@@ -70,10 +87,10 @@ export function MediaCard({
       <div className="card-actions">
         <button title="Play" aria-label="Play" onClick={() => actions.view(item)}><AppIcon name="play" size={17} /></button>
         {item.kind === "raw" ? <button title="Create clip" aria-label="Create clip" onClick={() => actions.trim(item)}><AppIcon name="clip" size={17} /></button> : null}
-        <button title="Show in Explorer" aria-label="Show in Explorer" onClick={() => actions.reveal(item)}><AppIcon name="search" size={17} /></button>
-        <details className="card-menu">
+        <button title="Show in folder" aria-label="Show in folder" onClick={() => actions.reveal(item)}><AppIcon name="search" size={17} /></button>
+        <details ref={menuRef} className="card-menu" onToggle={(event) => setMenuOpen(event.currentTarget.open)}>
           <summary title="More actions" aria-label="More actions"><AppIcon name="more" size={17} /></summary>
-          <div>
+          <div onClick={() => { if (menuRef.current) menuRef.current.open = false; }}>
             <button onClick={() => actions.tags(item)}><AppIcon name="tags" size={16} /> Moment tags</button>
             <button onClick={() => actions.notes(item)}><AppIcon name="notes" size={16} /> Notes</button>
             {actions.classify ? <button onClick={() => actions.classify?.(item)}><AppIcon name="game" size={16} /> Classify game</button> : null}

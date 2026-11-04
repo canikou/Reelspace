@@ -10,7 +10,7 @@ export function SetupPrompt({
   onDismiss: () => void;
 }) {
   return (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" onKeyDown={(event) => event.key === "Escape" && onDismiss()}>
       <section className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
         <header className="modal-header">
           <div>
@@ -21,7 +21,7 @@ export function SetupPrompt({
         </header>
         <div className="setup-body">
           <div className="setup-mark" aria-hidden="true"><FrameStackMark size={38} /></div>
-          <button className="primary-button" onClick={onChoose} disabled={busy} title="Choose source folder">
+          <button autoFocus className="primary-button" onClick={onChoose} disabled={busy} title="Choose source folder">
             <AppIcon name="add" size={18} />
             {busy ? "Opening..." : "Choose Folder"}
           </button>
