@@ -59,6 +59,9 @@ pub struct Config {
     pub rec_dir: PathBuf,
     pub clip_dir: Option<PathBuf>,
     pub cap_gb: u64,
+    /// One budget for all full recordings (rec_*/session_*, recursive, excluding clips). When set it
+    /// supersedes `cap_gb` and `session.retention`; `None` keeps those working as before.
+    pub max_storage_gb: Option<u64>,
     pub chunk_sec: u64,
     pub clip_sec: u32,
     pub bitrate_kbps: u32,
@@ -93,6 +96,7 @@ impl Default for Config {
             rec_dir: home().join("Videos/Recordings"),
             clip_dir: None,
             cap_gb: 256,
+            max_storage_gb: None,
             chunk_sec: 1800,
             clip_sec: 300,
             bitrate_kbps: 20000,
@@ -136,6 +140,9 @@ impl Config {
         }
         if self.cap_gb == 0 {
             return e("cap_gb must be > 0");
+        }
+        if self.max_storage_gb == Some(0) {
+            return e("max_storage_gb must be at least 1");
         }
         if self.chunk_sec < 60 {
             return e("chunk_sec must be at least 60");

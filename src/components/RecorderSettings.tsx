@@ -194,9 +194,14 @@ export function RecorderSections({ r }: { r: RecorderSettingsState }) {
         <SettingRow label="Clips folder" help="Defaults to Clips inside the recordings folder." htmlFor="rec-clip-dir" stack>
           <input id="rec-clip-dir" value={config.clip_dir ?? ""} onChange={(event) => set({ clip_dir: event.target.value.trim() || null })} />
         </SettingRow>
-        <SettingRow label="Archive size cap (GB)" help="Rolling archive: the oldest chunks are deleted past this size." htmlFor="rec-cap">
-          <input id="rec-cap" type="number" min="1" value={config.cap_gb} onChange={(event) => set({ cap_gb: num(event.target.value) })} />
+        <SettingRow label="Storage budget" help="Oldest full recordings are deleted first when over budget. Clips are never deleted automatically." htmlFor="rec-budget">
+          <input id="rec-budget" type="number" min="1" placeholder="No limit (until the disk floor)" value={config.max_storage_gb ?? ""} onChange={(event) => set({ max_storage_gb: event.target.value === "" ? null : num(event.target.value) })} />
         </SettingRow>
+        {config.max_storage_gb == null ? (
+          <SettingRow label="Archive size cap (GB)" help="Rolling archive: the oldest chunks are deleted past this size." htmlFor="rec-cap">
+            <input id="rec-cap" type="number" min="1" value={config.cap_gb} onChange={(event) => set({ cap_gb: num(event.target.value) })} />
+          </SettingRow>
+        ) : null}
         <SettingRow label="Chunk length (seconds)" htmlFor="rec-chunk">
           <input id="rec-chunk" type="number" min="60" value={config.chunk_sec} onChange={(event) => set({ chunk_sec: num(event.target.value) })} />
         </SettingRow>
@@ -209,15 +214,15 @@ export function RecorderSections({ r }: { r: RecorderSettingsState }) {
       </SettingsGroup>
 
       <SettingsGroup title="Game sessions">
-        <SettingRow label="Keep session recordings" htmlFor="rec-retention">
+        {config.max_storage_gb == null ? <SettingRow label="Keep session recordings" htmlFor="rec-retention">
           <select id="rec-retention" value={retention.kind} onChange={(event) => setSession({ retention: event.target.value === "days" ? { kind: "days", days: 30 } : event.target.value === "size_cap_gb" ? { kind: "size_cap_gb", gb: 100 } : { kind: "keep_forever" } })}>
             <option value="keep_forever">Forever</option>
             <option value="days">For a number of days</option>
             <option value="size_cap_gb">Up to a total size</option>
           </select>
-        </SettingRow>
-        {retention.kind === "days" ? <SettingRow label="Days" htmlFor="rec-days"><input id="rec-days" type="number" min="1" value={retention.days} onChange={(event) => setSession({ retention: { kind: "days", days: num(event.target.value) } })} /></SettingRow> : null}
-        {retention.kind === "size_cap_gb" ? <SettingRow label="Total size (GB)" htmlFor="rec-gb"><input id="rec-gb" type="number" min="1" value={retention.gb} onChange={(event) => setSession({ retention: { kind: "size_cap_gb", gb: num(event.target.value) } })} /></SettingRow> : null}
+        </SettingRow> : null}
+        {config.max_storage_gb == null && retention.kind === "days" ? <SettingRow label="Days" htmlFor="rec-days"><input id="rec-days" type="number" min="1" value={retention.days} onChange={(event) => setSession({ retention: { kind: "days", days: num(event.target.value) } })} /></SettingRow> : null}
+        {config.max_storage_gb == null && retention.kind === "size_cap_gb" ? <SettingRow label="Total size (GB)" htmlFor="rec-gb"><input id="rec-gb" type="number" min="1" value={retention.gb} onChange={(event) => setSession({ retention: { kind: "size_cap_gb", gb: num(event.target.value) } })} /></SettingRow> : null}
         <SettingRow label="Discard sessions shorter than (seconds)" htmlFor="rec-minsession">
           <input id="rec-minsession" type="number" min="0" value={config.session.min_session_sec} onChange={(event) => setSession({ min_session_sec: num(event.target.value) })} />
         </SettingRow>

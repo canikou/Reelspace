@@ -33,12 +33,18 @@ pub fn status_map(ctl: &Control) -> HashMap<String, OwnedValue> {
     m.insert("mode".into(), ov(cfg.mode.as_str().to_string()));
     m.insert("replay_seconds".into(), ov(s.replay_seconds));
     m.insert("archive_bytes".into(), ov(s.archive_bytes));
-    m.insert("cap_bytes".into(), ov(cfg.cap_gb * GB));
+    m.insert(
+        "cap_bytes".into(),
+        ov(cfg.max_storage_gb.unwrap_or(cfg.cap_gb) * GB),
+    );
     m.insert("free_bytes".into(), ov(s.free_bytes));
     m.insert("min_free_bytes".into(), ov(cfg.min_free_gb * GB));
     m.insert(
         "archive_hours_estimate".into(),
-        ov(archive_hours(cfg.cap_gb, cfg.bitrate_kbps)),
+        ov(archive_hours(
+            cfg.max_storage_gb.unwrap_or(cfg.cap_gb),
+            cfg.bitrate_kbps,
+        )),
     );
     m.insert("current_chunk_started".into(), ov(s.chunk_started));
     m.insert("session_game".into(), ov(s.session_game));

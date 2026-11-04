@@ -25,3 +25,5 @@ Clips and session files carry xattrs `user.reelspace.game`, `user.reelspace.stea
 
 ## Running
 `systemctl --user enable --now reelspace-recorder` (deb/rpm install the unit; AppImage cannot ship a system unit). Stop any other gpu-screen-recorder replay service first — the daemon refuses to double-capture. Config: `~/.config/reelspace/recorder.json` (see `Config` in `src-tauri/src/recorder/config.rs`).
+
+Storage budget: `max_storage_gb` (optional, >= 1; default unset = no limit other than the `min_free_gb` floor). When set, it is the single budget for all full recordings (`rec_*.mkv` and `session_*.mkv`, found recursively under `rec_dir`, excluding the clips folder and `.replay`); the oldest by filename timestamp are deleted first, both for the budget and for the disk floor, and `cap_gb` / `session.retention` are ignored. The `Status` keys `cap_bytes` and `archive_hours_estimate` then use the budget. When unset, `cap_gb` and `session.retention` behave as before. Clips are never deleted automatically.
