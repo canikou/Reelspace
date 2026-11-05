@@ -134,6 +134,98 @@ pub fn select_space_prune(
     out
 }
 
+/// `YYYY-MM-DD_HH-MM-SS` at the end of a rec_/session_ file stem, as local-time epoch seconds.
+fn name_epoch(name: &str) -> Option<i64> {
+    let stem = name.strip_suffix(".mkv")?;
+    let ts = stem.get(stem.len().checked_sub(19)?..)?;
+    if !is_timestamp(ts) {
+        return None;
+    }
+    let n = NaiveDateTime::parse_from_str(ts, "%Y-%m-%d_%H-%M-%S").ok()?;
+    Some(n.and_local_timezone(Local).earliest()?.timestamp())
+}
+
+fn age_key(f: &FileInfo) -> i64 {
+    name_epoch(name_of(f)).unwrap_or_else(|| {
+        f.mtime
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    })
+}
+
+/// Full recordings (`rec_*`/`session_*`) anywhere under `rec_dir`, skipping `clip_dir`, `.replay` and symlinks.
+/// The in-progress file is `Video_<ts>.mkv` until finalised, so it never matches.
+pub fn list_full_recordings(rec_dir: &Path, clip_dir: &Path) -> Vec<FileInfo> {
+    let mut out = vec![];
+    let mut stack = vec![rec_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(md) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if md.is_dir() {
+                if p != clip_dir && p.file_name().is_none_or(|n| n != ".replay") {
+                    stack.push(p);
+                }
+            } else if md.is_file() {
+                let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if is_rec_name(n) || is_session_name(n) {
+                    out.push(FileInfo {
+                        size: md.len(),
+                        mtime: md.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                        path: p,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+fn oldest_first_all(files: &[FileInfo]) -> Vec<&FileInfo> {
+    let mut v: Vec<_> = files.iter().collect();
+    v.sort_by(|a, b| {
+        age_key(a)
+            .cmp(&age_key(b))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    v
+}
+
+/// `max_storage_gb` mode: oldest full recordings to delete so the total fits `budget` minus `headroom`.
+/// `files` must come from `list_full_recordings`.
+pub fn select_budget_prune(files: &[FileInfo], budget: u64, headroom: u64) -> Vec<PathBuf> {
+    let target = budget.saturating_sub(headroom);
+    let mut total: u64 = files.iter().map(|f| f.size).sum();
+    let mut out = vec![];
+    for f in oldest_first_all(files) {
+        if total <= target {
+            break;
+        }
+        total -= f.size;
+        out.push(f.path.clone());
+    }
+    out
+}
+
+/// `max_storage_gb` mode disk floor: oldest full recordings (rec_ and session_ alike) freeing >= `deficit`.
+pub fn select_floor_prune(files: &[FileInfo], deficit: u64) -> Vec<PathBuf> {
+    let mut freed = 0;
+    let mut out = vec![];
+    for f in oldest_first_all(files) {
+        if freed >= deficit {
+            break;
+        }
+        freed += f.size;
+        out.push(f.path.clone());
+    }
+    out
+}
+
 /// `session_*.mkv` files past retention. `KeepForever` never expires anything.
 pub fn expired_sessions(
     files: &[FileInfo],
@@ -446,6 +538,56 @@ mod tests {
             select_space_prune(&files, 500, &Retention::KeepForever, now()).len(),
             1
         );
+    }
+
+    #[test]
+    fn budget_prune_nested_oldest_first_clips_and_current_untouched() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        let clips = r.join("Clips");
+        for sub in ["Clips", "a/b", ".replay"] {
+            std::fs::create_dir_all(r.join(sub)).unwrap();
+        }
+        let w = |p: &str, n: usize| std::fs::write(r.join(p), vec![0u8; n]).unwrap();
+        w("a/b/rec_2026-01-01_00-00-00.mkv", 100);
+        w("session_G_2026-01-02_00-00-00.mkv", 100);
+        w("a/rec_2026-01-03_00-00-00.mkv", 100);
+        w("Clips/rec_2025-01-01_00-00-00.mkv", 9999); // oldest+largest, in clip_dir
+        w("Clips/clip_2025-01-01_00-00-00.mp4", 9999);
+        w(".replay/rec_2025-01-01_00-00-00.mkv", 9999);
+        w("Video_2026-01-04_00-00-00.mkv", 9999); // currently recording
+        w("notes.mkv", 9999);
+        let files = list_full_recordings(r, &clips);
+        assert_eq!(files.len(), 3);
+        let del = select_budget_prune(&files, 150, 0);
+        assert_eq!(
+            del,
+            vec![
+                r.join("a/b/rec_2026-01-01_00-00-00.mkv"),
+                r.join("session_G_2026-01-02_00-00-00.mkv")
+            ]
+        );
+        // floor path: same order, huge deficit takes every full recording but nothing else
+        let all = select_floor_prune(&files, u64::MAX);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0], del[0]);
+        delete_checked(&all);
+        for keep in [
+            "Clips/rec_2025-01-01_00-00-00.mkv",
+            "Clips/clip_2025-01-01_00-00-00.mp4",
+            ".replay/rec_2025-01-01_00-00-00.mkv",
+            "Video_2026-01-04_00-00-00.mkv",
+            "notes.mkv",
+        ] {
+            assert!(r.join(keep).exists(), "{keep}");
+        }
+    }
+
+    #[test]
+    fn name_epoch_parses_local_and_session_slugs() {
+        assert!(name_epoch("rec_2026-01-02_03-04-05.mkv").is_some());
+        assert!(name_epoch("session_A_B_2026-01-02_03-04-05.mkv").is_some());
+        assert!(name_epoch("rec_x.mkv").is_none());
     }
 
     #[test]

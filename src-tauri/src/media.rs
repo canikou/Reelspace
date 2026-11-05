@@ -101,6 +101,7 @@ pub fn scan_folder(
         .with_detail(folder.display().to_string()));
     }
 
+    let clip_dir = recorder_clip_dir();
     let mut files = Vec::new();
     let mut files_visited = 0;
     let mut traversal_errors = 0;
@@ -112,7 +113,10 @@ pub fn scan_folder(
         match entry {
             Ok(entry) => {
                 files_visited += 1;
-                if entry.file_type().is_file() && is_video_file(entry.path()) {
+                if entry.file_type().is_file()
+                    && is_video_file(entry.path())
+                    && !is_in_progress_recording(entry.path())
+                {
                     files.push(entry.into_path());
                 }
             }
@@ -146,7 +150,7 @@ pub fn scan_folder(
             }
         }
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_raw_item(&path, ffmpeg, database, thumbnail_dir)
+            build_raw_item(&path, ffmpeg, database, thumbnail_dir, clip_dir.as_deref())
         }));
         match built {
             Ok(Ok((item, cache_hit))) => {
@@ -342,6 +346,7 @@ fn build_raw_item(
     ffmpeg: &Ffmpeg,
     database: &Database,
     thumbnail_dir: &Path,
+    recorder_clips: Option<&Path>,
 ) -> AppResult<(MediaItem, bool)> {
     // This function is only reached for new or changed sources. A stable path
     // ID must not make a replacement file reuse the previous frame forever.
@@ -363,10 +368,16 @@ fn build_raw_item(
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(modified_at);
+    // Recorder files carry their real start time in the name; mtime is when the chunk ended.
+    let created_at = recording_timestamp(path).unwrap_or(created_at);
     let id = stable_id(path);
     let mut item = MediaItem {
         id,
-        kind: MediaKind::Raw,
+        kind: if is_within(path, recorder_clips) {
+            MediaKind::Clip
+        } else {
+            MediaKind::Raw
+        },
         path: path.to_string_lossy().to_string(),
         source_path: None,
         filename: path
@@ -389,6 +400,101 @@ fn build_raw_item(
     };
     item.tags = vec![infer_shadowplay_tag(path)];
     Ok((item, cache_hit))
+}
+
+/// Recorder's still-growing `Video_<ts>.mkv`; it gets renamed when finalised.
+fn is_in_progress_recording(path: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        path.file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|n| crate::recorder::files::video_timestamp(n).is_some())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn is_within(path: &Path, root: Option<&Path>) -> bool {
+    root.is_some_and(|root| {
+        path_key_is_within(&normalized_path_key(path), &normalized_path_key(root))
+    })
+}
+
+/// True for files the recorder daemon saved as clips (Linux only).
+pub fn is_recorder_clip(path: &Path) -> bool {
+    is_within(path, recorder_clip_dir().as_deref())
+}
+
+/// The recorder's clip folder; None off Linux or when its config is invalid.
+#[cfg(target_os = "linux")]
+pub fn recorder_clip_dir() -> Option<PathBuf> {
+    recorder_clip_dir_from(&crate::recorder::config::config_path())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn recorder_clip_dir() -> Option<PathBuf> {
+    None
+}
+
+/// The recorder's recordings folder when the recorder is installed and the folder exists (Linux only).
+#[cfg(target_os = "linux")]
+pub fn recorder_rec_dir() -> Option<PathBuf> {
+    if !crate::features::recorder_supported() {
+        return None;
+    }
+    let dir = crate::recorder::config::Config::load(&crate::recorder::config::config_path())
+        .ok()?
+        .rec_dir;
+    dir.is_dir().then_some(dir)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn recorder_rec_dir() -> Option<PathBuf> {
+    None
+}
+
+/// Configured sources plus the recorder folder, unless it or a parent is already a source.
+/// A child source (e.g. rec_dir/Clips) stays; the caller dedupes items by path.
+pub fn effective_sources(configured: &[String]) -> Vec<String> {
+    with_recorder_dir(configured, recorder_rec_dir())
+}
+
+fn with_recorder_dir(configured: &[String], rec_dir: Option<PathBuf>) -> Vec<String> {
+    let mut out = configured.to_vec();
+    if let Some(dir) = rec_dir {
+        let key = normalized_path_key(&dir);
+        if !configured
+            .iter()
+            .any(|s| path_key_is_within(&key, &normalized_path_key(Path::new(s))))
+        {
+            out.push(dir.to_string_lossy().to_string());
+        }
+    }
+    out
+}
+
+/// Local-time `YYYY-MM-DD_HH-MM-SS` in a rec_/session_/clip_ file name, as unix seconds.
+pub fn recording_timestamp(path: &Path) -> Option<i64> {
+    let name = path.file_stem()?.to_str()?;
+    if !(name.starts_with("rec_") || name.starts_with("session_") || name.starts_with("clip_")) {
+        return None;
+    }
+    let ts = name.get(name.len().checked_sub(19)?..)?;
+    chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d_%H-%M-%S")
+        .ok()?
+        .and_local_timezone(chrono::Local)
+        .earliest()
+        .map(|t| t.timestamp())
+}
+
+#[cfg(target_os = "linux")]
+fn recorder_clip_dir_from(config: &Path) -> Option<PathBuf> {
+    crate::recorder::config::Config::load(config)
+        .ok()
+        .map(|cfg| cfg.clip_dir())
 }
 
 fn build_item_base(
@@ -618,6 +724,68 @@ fn unique_temp_path(output_path: &Path, stem: &str, extension: &str) -> PathBuf 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_timestamp_from_names() {
+        use chrono::TimeZone;
+        let want = chrono::Local
+            .with_ymd_and_hms(2026, 1, 2, 3, 4, 5)
+            .unwrap()
+            .timestamp();
+        for n in [
+            "rec_2026-01-02_03-04-05.mkv",
+            "session_Elden_Ring_2026-01-02_03-04-05.mkv",
+            "clip_2026-01-02_03-04-05.mp4",
+        ] {
+            assert_eq!(
+                recording_timestamp(Path::new(&format!("/x/{n}"))),
+                Some(want),
+                "{n}"
+            );
+        }
+        assert_eq!(
+            recording_timestamp(Path::new("/x/holiday_2026-01-02_03-04-05.mp4")),
+            None
+        );
+        assert_eq!(recording_timestamp(Path::new("/x/rec_nope.mkv")), None);
+    }
+
+    #[test]
+    fn recorder_dir_added_unless_covered() {
+        let rec = || Some(PathBuf::from("/v/Rec"));
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(with_recorder_dir(&s(&["/a"]), rec()), s(&["/a", "/v/Rec"]));
+        assert_eq!(with_recorder_dir(&s(&["/v"]), rec()), s(&["/v"]));
+        assert_eq!(with_recorder_dir(&s(&["/v/Rec"]), rec()), s(&["/v/Rec"]));
+        assert_eq!(
+            with_recorder_dir(&s(&["/v/Rec/Clips"]), rec()),
+            s(&["/v/Rec/Clips", "/v/Rec"])
+        );
+        assert_eq!(with_recorder_dir(&s(&["/a"]), None), s(&["/a"]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recorder_clip_dir_follows_config_and_tolerates_bad_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("recorder.json");
+        // Missing file falls back to defaults; invalid JSON is skipped.
+        assert!(recorder_clip_dir_from(&cfg).is_some());
+        std::fs::write(&cfg, "{nope").unwrap();
+        assert_eq!(recorder_clip_dir_from(&cfg), None);
+        std::fs::write(&cfg, r#"{"rec_dir":"/data/rec"}"#).unwrap();
+        let clips = recorder_clip_dir_from(&cfg).unwrap();
+        assert_eq!(clips, PathBuf::from("/data/rec/Clips"));
+        assert!(is_within(
+            Path::new("/data/rec/Clips/clip_1.mp4"),
+            Some(&clips)
+        ));
+        assert!(!is_within(
+            Path::new("/data/rec/Clips2/a.mp4"),
+            Some(&clips)
+        ));
+        assert!(!is_within(Path::new("/data/rec/raw.mp4"), Some(&clips)));
+    }
 
     #[test]
     fn filename_sanitizing_is_unicode_safe_and_nonempty() {

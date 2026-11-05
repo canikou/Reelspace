@@ -179,13 +179,24 @@ pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> 
         .telemetry
         .event("info", "library.scan.started", json!({}));
     let settings = state.db.load_settings()?;
-    let existing_items = state.db.list_media(Some(MediaKind::Raw))?;
+    // Recorder clips are scanned like raws but stored as Clips, so track them too.
+    let existing_items = state
+        .db
+        .list_media(None)?
+        .into_iter()
+        .filter(|item| {
+            item.kind == MediaKind::Raw || media::is_recorder_clip(Path::new(&item.path))
+        })
+        .collect::<Vec<_>>();
     let existing = existing_items
         .iter()
         .cloned()
         .map(|item| (media::normalized_path_key(Path::new(&item.path)), item))
         .collect::<HashMap<_, _>>();
-    let excluded_roots = output_roots(&settings);
+    let mut excluded_roots = output_roots(&settings);
+    if let Some(rec) = media::recorder_rec_dir() {
+        excluded_roots.push(rec.join(".replay")); // gsr replay-buffer segments
+    }
     let mut scanned = Vec::new();
     let mut reachable_sources = Vec::new();
     let mut files_visited = 0;
@@ -197,7 +208,7 @@ pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> 
     let mut traversal_errors = 0;
     let mut changed_path_keys = HashSet::new();
     let mut failures_by_code = HashMap::<String, usize>::new();
-    for folder in &settings.source_folders {
+    for folder in &media::effective_sources(&settings.source_folders) {
         let source_id = stable_id(folder);
         match media::scan_folder(
             Path::new(folder),
@@ -239,6 +250,9 @@ pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> 
             }
         }
     }
+    // A child source (rec_dir/Clips) overlaps the auto-added recorder folder.
+    let mut seen = HashSet::new();
+    scanned.retain(|item| seen.insert(item.id.clone()));
     let scanned_count = scanned.len();
     let changed_items = scanned
         .iter()
@@ -250,9 +264,21 @@ pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> 
         .collect::<Vec<_>>();
     state.db.upsert_media_batch(&changed_items)?;
     state.db.classify_media_items(&changed_items)?;
-    if settings.automatically_archive_recordings {
+    for item in changed_items.iter().filter(|item| {
+        item.kind == MediaKind::Clip
+            && !existing.contains_key(&media::normalized_path_key(Path::new(&item.path)))
+    }) {
+        state
+            .db
+            .initialize_clip_preferences(&item.id, &item.id, settings.keep_local_clips)?;
+    }
+    {
         let media_ids = changed_items
             .iter()
+            .filter(|item| match item.kind {
+                MediaKind::Clip => settings.automatically_archive_clips,
+                _ => settings.automatically_archive_recordings,
+            })
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
         if !media_ids.is_empty() {

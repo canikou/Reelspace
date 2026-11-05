@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { api } from "./lib/api";
+import { api, initMediaSrc } from "./lib/api";
 import "./styles.css";
 
 window.addEventListener("error", (event) => {
@@ -20,10 +20,10 @@ window.addEventListener("unhandledrejection", (event) => {
     .catch(() => undefined);
 });
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+void initMediaSrc().then(() => ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>
       <App />
     </ErrorBoundary>
   </React.StrictMode>
-);
+));

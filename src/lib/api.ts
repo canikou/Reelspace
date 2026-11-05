@@ -74,8 +74,17 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
   }
 }
 
+// Linux WebKitGTK cannot stream media from asset://; a loopback server is used instead.
+let mediaBase: string | null = null;
+
+export async function initMediaSrc(): Promise<void> {
+  mediaBase = await invoke<string | null>("media_server_base").catch(() => null);
+}
+
 export function mediaSrc(path?: string | null): string | undefined {
-  return path ? convertFileSrc(path) : undefined;
+  if (!path) return undefined;
+  if (mediaBase) return `${mediaBase}${path.split("/").map(encodeURIComponent).join("/")}`;
+  return convertFileSrc(path);
 }
 
 export const api = {

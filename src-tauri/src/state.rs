@@ -127,6 +127,7 @@ fn authorize_asset_scope(
         .map(PathBuf::from)
         .chain(settings.working_folder.as_ref().map(PathBuf::from))
         .chain(settings.clip_folder.as_ref().map(PathBuf::from))
+        .chain(crate::media::recorder_rec_dir())
     {
         scope.allow_directory(directory, true)?;
     }

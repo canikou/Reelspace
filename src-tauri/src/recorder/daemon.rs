@@ -564,12 +564,19 @@ impl Supervisor {
         let free = files::free_bytes(&cfg.rec_dir).unwrap_or(0);
         let mut deficit = files::space_deficit(free, floor, next);
         if deficit > 0 {
-            let victims = files::select_space_prune(
-                &files::list_files(&cfg.rec_dir),
-                deficit,
-                &cfg.session.retention,
-                SystemTime::now(),
-            );
+            let victims = if cfg.max_storage_gb.is_some() {
+                files::select_floor_prune(
+                    &files::list_full_recordings(&cfg.rec_dir, &cfg.clip_dir()),
+                    deficit,
+                )
+            } else {
+                files::select_space_prune(
+                    &files::list_files(&cfg.rec_dir),
+                    deficit,
+                    &cfg.session.retention,
+                    SystemTime::now(),
+                )
+            };
             files::delete_checked(&victims);
             deficit =
                 files::space_deficit(files::free_bytes(&cfg.rec_dir).unwrap_or(0), floor, next);
@@ -595,18 +602,20 @@ impl Supervisor {
     }
 
     fn housekeeping(&mut self, cfg: &Config) {
-        let files = files::list_files(&cfg.rec_dir);
-        let cap = cfg.cap_gb * GB;
-        files::delete_checked(&files::select_cap_prune(
-            &files,
-            cap,
-            chunk_bytes(cfg.bitrate_kbps, cfg.chunk_sec),
-        ));
-        files::delete_checked(&files::expired_sessions(
-            &files,
-            &cfg.session.retention,
-            SystemTime::now(),
-        ));
+        let headroom = chunk_bytes(cfg.bitrate_kbps, cfg.chunk_sec);
+        if let Some(gb) = cfg.max_storage_gb {
+            // budget supersedes cap_gb and session.retention
+            let full = files::list_full_recordings(&cfg.rec_dir, &cfg.clip_dir());
+            files::delete_checked(&files::select_budget_prune(&full, gb * GB, headroom));
+        } else {
+            let files = files::list_files(&cfg.rec_dir);
+            files::delete_checked(&files::select_cap_prune(&files, cfg.cap_gb * GB, headroom));
+            files::delete_checked(&files::expired_sessions(
+                &files,
+                &cfg.session.retention,
+                SystemTime::now(),
+            ));
+        }
         if self.rec.is_some() || self.disk_blocked {
             // mid-chunk check: floor only (the next chunk is checked at rotation)
             let free = files::free_bytes(&cfg.rec_dir).unwrap_or(0);
@@ -628,9 +637,16 @@ impl Supervisor {
         ) {
             self.ctl.set_state(self.run_state(cfg), "");
         }
-        let files = files::list_files(&cfg.rec_dir);
+        let archive_bytes = if cfg.max_storage_gb.is_some() {
+            files::list_full_recordings(&cfg.rec_dir, &cfg.clip_dir())
+                .iter()
+                .map(|f| f.size)
+                .sum()
+        } else {
+            files::rec_total(&files::list_files(&cfg.rec_dir))
+        };
         let mut s = self.ctl.status.lock().unwrap();
-        s.archive_bytes = files::rec_total(&files);
+        s.archive_bytes = archive_bytes;
         s.free_bytes = files::free_bytes(&cfg.rec_dir).unwrap_or(0);
         s.replay_seconds = if self.child.is_some() {
             cfg.clip_sec

@@ -205,6 +205,7 @@ export interface RecorderConfig {
   rec_dir: string;
   clip_dir: string | null;
   cap_gb: number;
+  max_storage_gb: number | null;
   chunk_sec: number;
   clip_sec: number;
   bitrate_kbps: number;

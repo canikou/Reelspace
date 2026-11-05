@@ -897,6 +897,17 @@ fn recorder_candidates() -> Vec<(String, String, PathBuf)> {
 }
 
 fn game_label_for_path(path: &Path) -> Option<String> {
+    // The recorder tags clips with the game it detected.
+    #[cfg(target_os = "linux")]
+    if let Some(game) = xattr::get(path, "user.reelspace.game")
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|game| game.trim().to_owned())
+        .filter(|game| !game.is_empty())
+    {
+        return Some(game);
+    }
     let generic = [
         "clips",
         "captures",
