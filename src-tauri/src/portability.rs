@@ -295,6 +295,7 @@ pub fn import_library_data(
         .enumerate()
         .map(|(index, item)| (normalized_path_key(Path::new(&item.path)), index))
         .collect::<HashMap<_, _>>();
+    let by_filename = index_by_filename(&current);
     let mut matched_items = 0u64;
     let mut restored_items = Vec::new();
     let mut updates = Vec::new();
@@ -304,7 +305,7 @@ pub fn import_library_data(
     let mut claimed_local_ids = HashSet::new();
 
     for archived in &archive.items {
-        if let Some(index) = match_existing(archived, &current, &by_path, &roots) {
+        if let Some(index) = match_existing(archived, &current, &by_path, &by_filename, &roots) {
             let local = &current[index];
             if !claimed_local_ids.insert(local.id.clone()) {
                 continue;
@@ -727,6 +728,7 @@ fn match_existing(
     archived: &ArchiveItem,
     current: &[MediaItem],
     by_path: &HashMap<String, usize>,
+    by_filename: &HashMap<String, Vec<usize>>,
     roots: &[PathBuf],
 ) -> Option<usize> {
     let original_key = normalized_path_key(Path::new(&archived.original_path));
@@ -746,16 +748,25 @@ fn match_existing(
             return candidates.into_iter().next();
         }
     }
-    let candidates = current
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            item.filename.eq_ignore_ascii_case(&archived.filename)
-                && signature_matches(archived, item)
-        })
-        .map(|(index, _)| index)
+    let candidates = by_filename
+        .get(&archived.filename.to_ascii_lowercase())
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|index| signature_matches(archived, &current[*index]))
         .collect::<Vec<_>>();
     (candidates.len() == 1).then(|| candidates[0])
+}
+
+fn index_by_filename(current: &[MediaItem]) -> HashMap<String, Vec<usize>> {
+    let mut by_filename = HashMap::<String, Vec<usize>>::new();
+    for (index, item) in current.iter().enumerate() {
+        by_filename
+            .entry(item.filename.to_ascii_lowercase())
+            .or_default()
+            .push(index);
+    }
+    by_filename
 }
 
 fn signature_matches(archived: &ArchiveItem, current: &MediaItem) -> bool {
@@ -1516,7 +1527,8 @@ mod tests {
             .enumerate()
             .map(|(index, item)| (normalized_path_key(Path::new(&item.path)), index))
             .collect();
-        assert!(match_existing(&archived, &current, &by_path, &[]).is_none());
+        let by_filename = index_by_filename(&current);
+        assert!(match_existing(&archived, &current, &by_path, &by_filename, &[]).is_none());
     }
 
     #[test]

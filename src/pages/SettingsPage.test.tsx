@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { AppSnapshot } from "../lib/types";
-import { SettingsPage } from "./SettingsPage";
+import { SettingsPage, settingsFingerprint } from "./SettingsPage";
 
 const snapshot: AppSnapshot = {
   version: "0.1.1-alpha.1",
@@ -77,5 +77,14 @@ describe("SettingsPage library data controls", () => {
     expect(markup).toContain("Connect YouTube");
     expect(markup).not.toContain("OAuth client ID");
     expect(markup).not.toContain("OAuth client secret");
+  });
+});
+
+describe("SettingsPage form sync", () => {
+  // No DOM in this test env, so the effect dep is tested directly: it must not change when refresh() hands over an equal-content snapshot.
+  it("keeps the same fingerprint for equal settings in a new object and changes it on a real change", () => {
+    const rescanned = { ...snapshot, settings: { ...snapshot.settings, sourceFolders: [...snapshot.settings.sourceFolders] } };
+    expect(settingsFingerprint(rescanned.settings)).toBe(settingsFingerprint(snapshot.settings));
+    expect(settingsFingerprint({ ...snapshot.settings, cleanupThresholdPercent: 80 })).not.toBe(settingsFingerprint(snapshot.settings));
   });
 });

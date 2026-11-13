@@ -35,6 +35,8 @@ const fromSettings = (s: AppSettings): Values => ({
   pauseUploads: s.pauseUploadsWhileRecording ?? true,
 });
 
+export const settingsFingerprint = (s: AppSettings) => JSON.stringify(s);
+
 const toSettings = (v: Values): AppSettings => ({
   sourceFolders: v.sourceFolders.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
   workingFolder: v.workingFolder.trim() || null,
@@ -102,7 +104,9 @@ export function SettingsPage({
     api.recorderSupported().then(setRecorderSupported).catch(() => undefined);
   }, []);
 
-  useEffect(() => { setV(fromSettings(snapshot.settings)); }, [snapshot]);
+  // Key on content: refresh() makes a new snapshot object every time, which must not wipe unsaved edits.
+  const settingsKey = settingsFingerprint(snapshot.settings);
+  useEffect(() => { setV(fromSettings(snapshot.settings)); }, [settingsKey]);
 
   // Highlight the section in the reading band near the top of the scroll area.
   useEffect(() => {

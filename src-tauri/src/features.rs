@@ -804,7 +804,7 @@ pub fn export_diagnostics(state: State<'_, AppState>, path: String) -> AppResult
         "schemaVersion": 1,
         "generatedAt": Utc::now().to_rfc3339(),
         "reelspaceVersion": env!("CARGO_PKG_VERSION"),
-        "platform": "windows-x64",
+        "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "sourceFolderCount": settings.source_folders.len(),
         "mediaItems": media.len(),
         "queuedArchiveJobs": jobs.iter().filter(|job| job.state != "archived").count(),

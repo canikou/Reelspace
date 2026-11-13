@@ -158,6 +158,8 @@ export function App() {
     [refresh, showError]
   );
 
+  const enrichedById = useMemo(() => new Map([...rawItems, ...clipItems].map((item) => [item.id, item])), [rawItems, clipItems]);
+
   const rootsKey = snapshot?.settings.sourceFolders.join("\0") ?? "";
   const scan = useCallback(async ({ silent = false, force = false }: { silent?: boolean; force?: boolean } = {}) => {
     if (scanInFlight.current) return;
@@ -289,7 +291,7 @@ export function App() {
           <CollectionsPage
             collections={collections}
             selected={selectedCollection}
-            items={collectionItems}
+            items={collectionItems.map((item) => enrichedById.get(item.id) ?? item)}
             actions={actions}
             onCreate={() => setCreatingCollection(true)}
             onSelect={openCollection}

@@ -203,7 +203,6 @@ pub fn build_clip_item(
         &temp_path,
         request.start_seconds,
         request.end_seconds,
-        true,
         request
             .enabled_audio_track_indices
             .as_deref()

@@ -3,7 +3,7 @@ use crate::error::{app_error, user_error, AppError, AppResult, ErrorCode};
 use crate::media;
 use crate::models::{
     AppSettings, AppSnapshot, AudioPreviewResult, AudioTrack, Collection, CreateClipRequest,
-    LibraryDataExportSummary, LibraryDataImportSummary, MediaItem, MediaKind, StorageStats,
+    LibraryDataExportSummary, LibraryDataImportSummary, MediaItem, MediaKind,
 };
 use crate::portability;
 use crate::state::AppState;
@@ -112,8 +112,8 @@ where
 #[tauri::command]
 pub fn get_app_state(state: State<'_, AppState>) -> AppResult<AppSnapshot> {
     let settings = state.db.load_settings()?;
-    let media = state.db.list_media(None)?;
-    let stats = storage::stats(&media, &settings);
+    let (raw_bytes, clip_bytes) = state.db.media_size_totals()?;
+    let stats = storage::stats(raw_bytes, clip_bytes, &settings);
     Ok(AppSnapshot {
         version: env!("CARGO_PKG_VERSION").to_string(),
         settings,
@@ -170,10 +170,7 @@ impl Drop for ScanInFlightGuard {
 }
 
 pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> {
-    let _index_guard = state
-        .media_index_lock
-        .lock()
-        .map_err(|_| user_error("media index lock was poisoned"))?;
+    let _index_guard = crate::jobs::lock_unpoisoned(&state.media_index_lock);
     let started = Instant::now();
     state
         .telemetry
@@ -219,7 +216,13 @@ pub(crate) fn scan_sources_inner(state: &AppState) -> AppResult<Vec<MediaItem>> 
             &excluded_roots,
         ) {
             Ok(result) => {
-                if result.traversal_errors == 0 {
+                if result.traversal_errors == 0
+                    && !looks_like_unmounted_source(
+                        Path::new(folder),
+                        result.files_visited,
+                        &existing_items,
+                    )
+                {
                     reachable_sources.push(PathBuf::from(folder));
                 }
                 files_visited += result.files_visited;
@@ -598,10 +601,7 @@ pub async fn export_library_data(
 }
 
 fn export_library_data_inner(state: &AppState, path: &str) -> AppResult<LibraryDataExportSummary> {
-    let _index_guard = state
-        .media_index_lock
-        .lock()
-        .map_err(|_| user_error("media index lock was poisoned"))?;
+    let _index_guard = crate::jobs::lock_unpoisoned(&state.media_index_lock);
     let settings = state.db.load_settings()?;
     let summary =
         portability::export_library_data(&state.db, &settings, &state.data_dir, Path::new(&path))?;
@@ -637,10 +637,7 @@ pub async fn import_library_data(
 }
 
 fn import_library_data_inner(state: &AppState, path: &str) -> AppResult<LibraryDataImportSummary> {
-    let _index_guard = state
-        .media_index_lock
-        .lock()
-        .map_err(|_| user_error("media index lock was poisoned"))?;
+    let _index_guard = crate::jobs::lock_unpoisoned(&state.media_index_lock);
     let settings = state.db.load_settings()?;
     let summary =
         portability::import_library_data(&state.db, &settings, &state.data_dir, Path::new(&path))?;
@@ -782,19 +779,6 @@ pub fn reveal_in_explorer(state: State<'_, AppState>, id: String) -> AppResult<(
 }
 
 #[tauri::command]
-pub fn get_storage_stats(state: State<'_, AppState>) -> AppResult<StorageStats> {
-    let settings = state.db.load_settings()?;
-    let media = state.db.list_media(None)?;
-    Ok(storage::stats(&media, &settings))
-}
-
-#[tauri::command]
-pub fn get_cleanup_candidates(state: State<'_, AppState>) -> AppResult<Vec<MediaItem>> {
-    let media = state.db.list_media(Some(MediaKind::Raw))?;
-    Ok(storage::cleanup_candidates(&media))
-}
-
-#[tauri::command]
 pub fn delete_raw_file(state: State<'_, AppState>, id: String) -> AppResult<Vec<MediaItem>> {
     validate_id(&id, "media")?;
     let item = state.db.get_media(&id)?;
@@ -870,6 +854,36 @@ fn resolve_clip_dir(settings: &AppSettings, data_dir: &Path) -> AppResult<PathBu
         .unwrap_or_else(|| data_dir.join("clips"));
     std::fs::create_dir_all(&clip_dir)?;
     Ok(clip_dir)
+}
+
+/// Hidden `.<stem>-<pid>-<n>.reelspace-part.<ext>` files are left behind when the app
+/// exits mid-export. Nothing is exporting at startup, so every one is an orphan.
+fn is_export_part_name(name: &str) -> bool {
+    name.starts_with('.') && name.contains(".reelspace-part.")
+}
+
+pub(crate) fn sweep_orphan_export_parts(state: &AppState) {
+    let Ok(settings) = state.db.load_settings() else {
+        return;
+    };
+    let clip_dir = settings
+        .clip_folder
+        .as_ref()
+        .or(settings.working_folder.as_ref())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.data_dir.join("clips"));
+    let Ok(entries) = fs::read_dir(clip_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let is_file = entry
+            .file_type()
+            .map(|file_type| file_type.is_file() && !file_type.is_symlink())
+            .unwrap_or(false);
+        if is_file && is_export_part_name(&entry.file_name().to_string_lossy()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn validate_settings(settings: &AppSettings) -> AppResult<()> {
@@ -962,6 +976,19 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
     let path_key = media::normalized_path_key(path);
     let root_key = media::normalized_path_key(root);
     media::path_key_is_within(&path_key, &root_key)
+}
+
+/// An empty source (only the root entry walked) that still has indexed rows is
+/// most likely an unmounted mount point, so its missing files must not be purged.
+fn looks_like_unmounted_source(
+    folder: &Path,
+    files_visited: usize,
+    existing: &[MediaItem],
+) -> bool {
+    files_visited <= 1
+        && existing
+            .iter()
+            .any(|item| path_is_within(Path::new(&item.path), folder))
 }
 
 fn belongs_to_roots(path: &Path, roots: &[PathBuf]) -> bool {
@@ -1414,6 +1441,47 @@ fn contains_forbidden_control(value: &str, allow_layout_whitespace: bool) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_hidden_export_parts_are_swept() {
+        assert!(is_export_part_name(".clip-12-3.reelspace-part.mp4"));
+        assert!(!is_export_part_name("clip.reelspace-part.mp4"));
+        assert!(!is_export_part_name(".hidden.mp4"));
+        assert!(!is_export_part_name("clip.mp4"));
+    }
+
+    #[test]
+    fn empty_source_with_indexed_rows_is_not_trusted_for_deletion() {
+        let folder = std::env::temp_dir().join("reelspace-mount");
+        let mut item = MediaItem {
+            id: "a".into(),
+            kind: MediaKind::Raw,
+            path: folder.join("clip.mp4").to_string_lossy().into_owned(),
+            source_path: None,
+            filename: "clip.mp4".into(),
+            file_size: 1,
+            duration_seconds: 1.0,
+            width: None,
+            height: None,
+            codec: None,
+            tags: vec![],
+            notes: None,
+            thumbnail_path: None,
+            created_at: 0,
+            modified_at: 0,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+        };
+        assert!(looks_like_unmounted_source(&folder, 1, &[item.clone()]));
+        assert!(!looks_like_unmounted_source(&folder, 1, &[]));
+        assert!(!looks_like_unmounted_source(&folder, 5, &[item.clone()]));
+        item.path = std::env::temp_dir()
+            .join("elsewhere")
+            .join("clip.mp4")
+            .to_string_lossy()
+            .into_owned();
+        assert!(!looks_like_unmounted_source(&folder, 1, &[item]));
+    }
 
     #[cfg(windows)]
     #[test]

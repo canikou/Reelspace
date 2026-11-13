@@ -26,6 +26,7 @@ const YOUTUBE_SCOPE: &str = "https://www.googleapis.com/auth/youtube.upload http
 const DEFAULT_CLIENT_ID: &str =
     "213662861772-slkhvmapt8hpv7r6f1ll3tv4gvcnfcd5.apps.googleusercontent.com";
 const BUNDLED_CLIENT_ID: Option<&str> = option_env!("REELSPACE_YOUTUBE_CLIENT_ID");
+const MAX_UPLOAD_ATTEMPTS: u32 = 8;
 const UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +119,7 @@ impl Database {
         let work = tx.query_row(
             "SELECT uj.id, uj.media_id, m.path, m.filename, uj.total_bytes, uj.bytes_uploaded, uj.session_url, uj.provider_remote_id, uj.attempts
              FROM upload_jobs uj INNER JOIN media m ON m.id = uj.media_id
-             WHERE uj.state IN ('queued', 'retry', 'processing_remote') AND uj.next_attempt_at <= ?1
+             WHERE uj.state IN ('queued', 'retry', 'processing_remote', 'waiting_for_quota') AND uj.next_attempt_at <= ?1
              ORDER BY uj.priority DESC, uj.created_at LIMIT 1",
             [now],
             |row| Ok(ArchiveWork {
@@ -270,6 +271,10 @@ pub(crate) fn start_youtube_worker(state: AppState) {
                             "needs_sign_in"
                         } else if error.message.contains("allowance") {
                             "waiting_for_quota"
+                        } else if is_permanent_upload_error(&error)
+                            || work.attempts + 1 >= MAX_UPLOAD_ATTEMPTS
+                        {
+                            "failed"
                         } else {
                             "retry"
                         };
@@ -404,7 +409,11 @@ fn process_archive_work(state: &AppState, work: &ArchiveWork) -> AppResult<()> {
     }
     let metadata = std::fs::metadata(&work.path).map_err(|error| {
         app_error(
-            ErrorCode::SourceUnavailable,
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ErrorCode::FileNotFound
+            } else {
+                ErrorCode::SourceUnavailable
+            },
             "The queued local file is unavailable",
         )
         .with_detail(error.to_string())
@@ -461,7 +470,7 @@ fn process_archive_work(state: &AppState, work: &ArchiveWork) -> AppResult<()> {
                 .get(RANGE)
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_uploaded_range)
-                .unwrap_or(last + 1);
+                .unwrap_or(0);
             state.db.set_upload_progress(&work.id, offset)?;
             continue;
         }
@@ -482,10 +491,7 @@ fn process_archive_work(state: &AppState, work: &ArchiveWork) -> AppResult<()> {
 }
 
 fn begin_upload(client: &Client, access_token: &str, work: &ArchiveWork) -> AppResult<String> {
-    let title = Path::new(&work.filename)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Reelspace recording");
+    let title = youtube_title(&work.filename);
     let response = client.post("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status")
         .bearer_auth(access_token).header(CONTENT_TYPE, "application/json; charset=UTF-8")
         .header("X-Upload-Content-Length", work.total_bytes).header("X-Upload-Content-Type", "application/octet-stream")
@@ -652,19 +658,32 @@ fn receive_oauth_callback(listener: TcpListener) -> AppResult<(String, String)> 
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // Accepted sockets inherit non-blocking mode on some platforms; bound each read instead.
+                stream.set_nonblocking(false)?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                 let mut buffer = [0_u8; 8192];
-                let read = stream.read(&mut buffer)?;
+                let Ok(read) = stream.read(&mut buffer) else {
+                    continue;
+                };
                 let request = String::from_utf8_lossy(&buffer[..read]);
-                let target = request
+                let Some(url) = request
                     .lines()
                     .next()
                     .and_then(|line| line.split_whitespace().nth(1))
-                    .ok_or_else(|| user_error("the OAuth callback was malformed"))?;
-                let url = Url::parse(&format!("http://127.0.0.1{target}"))
-                    .map_err(|_| user_error("the OAuth callback URL was malformed"))?;
+                    .and_then(|target| Url::parse(&format!("http://127.0.0.1{target}")).ok())
+                else {
+                    continue;
+                };
                 let values = url
                     .query_pairs()
                     .collect::<std::collections::HashMap<_, _>>();
+                if !values.contains_key("code") && !values.contains_key("error") {
+                    // e.g. /favicon.ico: answer and keep waiting for the real redirect.
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
                 let html = "<!doctype html><meta charset=utf-8><title>Reelspace connected</title><body style='font:16px system-ui;background:#0c0b12;color:#f4f1fa;padding:40px'><h1>Return to Reelspace</h1><p>You can close this tab.</p></body>";
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}", html.len());
                 let _ = stream.write_all(response.as_bytes());
@@ -859,6 +878,33 @@ fn parse_uploaded_range(value: &str) -> Option<u64> {
         .ok()?
         .checked_add(1)
 }
+/// YouTube rejects titles over 100 characters or containing angle brackets.
+fn youtube_title(filename: &str) -> String {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let title = stem
+        .chars()
+        .filter(|ch| !matches!(ch, '<' | '>'))
+        .take(100)
+        .collect::<String>();
+    let title = title.trim();
+    if title.is_empty() {
+        "Reelspace recording".to_owned()
+    } else {
+        title.to_owned()
+    }
+}
+
+/// Errors a retry cannot fix: the file changed or vanished, or YouTube answered HTTP 400.
+fn is_permanent_upload_error(error: &crate::error::AppError) -> bool {
+    matches!(error.code, ErrorCode::FileChanged | ErrorCode::FileNotFound)
+        || error
+            .detail()
+            .is_some_and(|detail| detail.starts_with("HTTP 400:"))
+}
+
 fn retry_delay(attempts: u32) -> i64 {
     (30_i64.saturating_mul(2_i64.saturating_pow(attempts.min(10)))).min(6 * 60 * 60)
 }
@@ -870,6 +916,26 @@ mod tests {
     fn resumable_ranges_continue_after_the_last_confirmed_byte() {
         assert_eq!(parse_uploaded_range("bytes=0-8388607"), Some(8_388_608));
     }
+    #[test]
+    fn upload_titles_fit_youtube_limits() {
+        assert_eq!(youtube_title("a<b>c.mp4"), "abc");
+        assert_eq!(
+            youtube_title(&format!("{}.mp4", "x".repeat(300))).len(),
+            100
+        );
+        assert_eq!(youtube_title("<>.mp4"), "Reelspace recording");
+    }
+
+    #[test]
+    fn permanent_upload_errors_are_not_retried() {
+        let changed = app_error(ErrorCode::FileChanged, "changed");
+        let bad_request = app_error(ErrorCode::SourceUnavailable, "x").with_detail("HTTP 400: {}");
+        let server = app_error(ErrorCode::SourceUnavailable, "x").with_detail("HTTP 503: {}");
+        assert!(is_permanent_upload_error(&changed));
+        assert!(is_permanent_upload_error(&bad_request));
+        assert!(!is_permanent_upload_error(&server));
+    }
+
     #[test]
     fn retry_backoff_is_bounded() {
         assert_eq!(retry_delay(0), 30);

@@ -41,7 +41,6 @@ impl AudioPreviewMethod {
 pub enum TrimMethod {
     Nvenc,
     Cpu,
-    StreamCopy,
 }
 
 impl TrimMethod {
@@ -49,7 +48,6 @@ impl TrimMethod {
         match self {
             Self::Nvenc => "nvenc",
             Self::Cpu => "libx264",
-            Self::StreamCopy => "stream_copy",
         }
     }
 }
@@ -317,7 +315,6 @@ impl Ffmpeg {
         output_path: &Path,
         start_seconds: f64,
         end_seconds: f64,
-        accurate: bool,
         audio_track_indices: &[u32],
     ) -> AppResult<TrimMethod> {
         let ffmpeg = self.ffmpeg_path.as_ref().ok_or_else(|| {
@@ -368,51 +365,38 @@ impl Ffmpeg {
             command.arg(output_path);
             run_with_timeout(command, timeout, "clip export")
         };
-        let (output, method) = if accurate {
-            let nvenc = run(&[
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p5",
-                "-cq",
-                "18",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-            ])?;
-            if nvenc.success {
-                (nvenc, TrimMethod::Nvenc)
-            } else {
-                (
-                    run(&[
-                        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt",
-                        "yuv420p", "-c:a", "aac", "-b:a", "192k",
-                    ])?,
-                    TrimMethod::Cpu,
-                )
-            }
+        let nvenc = run(&[
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p5",
+            "-cq",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+        ])?;
+        let (output, method) = if nvenc.success {
+            (nvenc, TrimMethod::Nvenc)
         } else {
             (
-                run(&["-c", "copy", "-avoid_negative_ts", "make_zero"])?,
-                TrimMethod::StreamCopy,
+                run(&[
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                ])?,
+                TrimMethod::Cpu,
             )
         };
         if output.success {
             Ok(method)
-        } else if accurate {
+        } else {
             Err(
                 app_error(ErrorCode::ExportFailed, "FFmpeg could not export the clip")
                     .with_detail(String::from_utf8_lossy(&output.stderr)),
             )
-        } else {
-            Err(app_error(
-                ErrorCode::ExportFailed,
-                "FFmpeg could not export the lossless clip",
-            )
-            .with_detail(String::from_utf8_lossy(&output.stderr)))
         }
     }
 }
