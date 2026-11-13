@@ -623,7 +623,20 @@ fn validate_archive(archive: &LibraryArchive) -> AppResult<()> {
     Ok(())
 }
 
+/// One plain path component: these values are joined under the data dir.
+fn is_single_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && !value.contains(['/', '\\'])
+}
+
 fn validate_item(item: &ArchiveItem) -> AppResult<()> {
+    if !is_single_component(&item.archive_id) || !is_single_component(&item.filename) {
+        return Err(user_error(
+            "an imported media identifier or filename is invalid",
+        ));
+    }
     validate_path_text(&item.original_path, "media path")?;
     if let Some(path) = &item.relative_path {
         validate_relative_path(path)?;
@@ -1529,6 +1542,28 @@ mod tests {
             .collect();
         let by_filename = index_by_filename(&current);
         assert!(match_existing(&archived, &current, &by_path, &by_filename, &[]).is_none());
+    }
+
+    #[test]
+    fn item_filename_and_id_must_be_single_path_components() {
+        assert!(validate_item(&archive_item()).is_ok());
+        for bad in [
+            "",
+            ".",
+            "..",
+            "..\\..\\x",
+            "a/b",
+            "C:\\x",
+            "\\\\srv\\share",
+            "/abs",
+        ] {
+            let mut bad_filename = archive_item();
+            bad_filename.filename = bad.into();
+            assert!(validate_item(&bad_filename).is_err(), "filename {bad:?}");
+            let mut bad_id = archive_item();
+            bad_id.archive_id = bad.into();
+            assert!(validate_item(&bad_id).is_err(), "archive_id {bad:?}");
+        }
     }
 
     #[test]

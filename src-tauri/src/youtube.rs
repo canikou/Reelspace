@@ -146,7 +146,7 @@ impl Database {
     }
 
     pub(crate) fn set_upload_progress(&self, job_id: &str, bytes: u64) -> AppResult<()> {
-        self.conn()?.execute("UPDATE upload_jobs SET bytes_uploaded = ?1, state = 'uploading', updated_at = ?2 WHERE id = ?3", params![bytes as i64, Utc::now().timestamp(), job_id])?;
+        self.conn()?.execute("UPDATE upload_jobs SET attempts = CASE WHEN ?1 > bytes_uploaded THEN 0 ELSE attempts END, bytes_uploaded = ?1, state = 'uploading', updated_at = ?2 WHERE id = ?3", params![bytes as i64, Utc::now().timestamp(), job_id])?;
         Ok(())
     }
 
@@ -916,6 +916,48 @@ mod tests {
     fn resumable_ranges_continue_after_the_last_confirmed_byte() {
         assert_eq!(parse_uploaded_range("bytes=0-8388607"), Some(8_388_608));
     }
+    #[test]
+    fn upload_progress_resets_attempts_only_when_the_offset_advances() {
+        let path = std::env::temp_dir().join(format!(
+            "reelspace-yt-progress-{}.sqlite",
+            std::process::id()
+        ));
+        let db = Database::open(path.clone()).expect("database");
+        {
+            let conn = db.conn().expect("conn");
+            conn.execute(
+                "INSERT INTO media (id, kind, path, filename, file_size, duration_seconds, tags_json, created_at, modified_at) VALUES ('m', 'raw', 'p', 'f.mp4', 1, 1.0, '[]', 1, 1)",
+                [],
+            )
+            .expect("media");
+            conn.execute(
+                "INSERT INTO upload_jobs (id, media_id, provider, state, attempts, created_at, updated_at) VALUES ('j', 'm', 'youtube', 'uploading', 5, 1, 1)",
+                [],
+            )
+            .expect("job");
+        }
+        let attempts = |db: &Database| -> i64 {
+            db.conn()
+                .expect("conn")
+                .query_row(
+                    "SELECT attempts FROM upload_jobs WHERE id = 'j'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("attempts")
+        };
+        db.set_upload_progress("j", 100).expect("advance");
+        assert_eq!(attempts(&db), 0);
+        db.conn()
+            .expect("conn")
+            .execute("UPDATE upload_jobs SET attempts = 3", [])
+            .expect("bump");
+        db.set_upload_progress("j", 100).expect("no progress");
+        assert_eq!(attempts(&db), 3);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn upload_titles_fit_youtube_limits() {
         assert_eq!(youtube_title("a<b>c.mp4"), "abc");
