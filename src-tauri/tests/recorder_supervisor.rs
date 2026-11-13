@@ -250,7 +250,16 @@ fn guards_block_start() {
         .unwrap()
         .last_error
         .contains("another gpu-screen-recorder"));
-    assert_eq!(rig.pids(), if rig.pids() == 0 { 0 } else { rig.pids() }); // may have raced the first tick; the state is what matters
+    // gsr may have started once before the dup file appeared (first tick), but never twice,
+    // and the 60 s retry delay means no further start while the duplicate stays.
+    let started = rig.pids();
+    assert!(started <= 1, "double capture: {started} gsr starts");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        rig.pids(),
+        started,
+        "gsr must not restart while the duplicate runs"
+    );
     rig.stop();
 
     // mountpoint guard
@@ -294,6 +303,62 @@ fn invalid_reload_keeps_last_good_config() {
             .contains("config rejected")
     });
     assert_eq!(rig.ctl.cfg().min_free_gb, 5);
+    rig.stop();
+}
+
+#[test]
+fn good_reload_clears_rejected_error_state() {
+    let rig = Rig::new(|_| {}, "1\\tRec_Mix\\tPipeWire\\n");
+    wait("recording", || rig.state() == "recording");
+    std::fs::write(&rig.ctl.cfg_path, br#"{"min_free_gb":1}"#).unwrap();
+    rig.ctl.reload.store(true, SeqCst);
+    wait("rejected", || rig.state() == "error");
+    assert!(rig
+        .ctl
+        .status
+        .lock()
+        .unwrap()
+        .last_error
+        .contains("config rejected"));
+    rig.switch(|_| {}); // rewrite the last good config and reload
+    wait("recovered", || {
+        rig.state() == "recording" && rig.ctl.status.lock().unwrap().last_error.is_empty()
+    });
+    rig.stop();
+}
+
+#[test]
+fn startup_config_hold_stays_paused_until_good_reload() {
+    let rig = Rig::new(|_| {}, "1\\tRec_Mix\\tPipeWire\\n");
+    wait("recording", || rig.state() == "recording");
+    // what cli.rs sets when the config file is invalid at startup
+    rig.ctl.status.lock().unwrap().last_error = "config rejected: test".into();
+    rig.ctl.config_hold.store(true, SeqCst);
+    rig.ctl.paused.store(true, SeqCst);
+    wait("paused", || rig.state() == "paused");
+    assert_eq!(rig.pids(), 1);
+    rig.switch(|_| {});
+    wait("recording again", || rig.state() == "recording");
+    assert!(!rig.ctl.paused.load(SeqCst));
+    assert!(!rig.ctl.config_hold.load(SeqCst));
+    assert!(rig.ctl.status.lock().unwrap().last_error.is_empty());
+    assert_eq!(rig.pids(), 2);
+    rig.stop();
+}
+
+#[test]
+fn rec_dir_change_finalizes_in_progress_file_in_old_dir() {
+    let rig = Rig::new(|_| {}, "1\\tRec_Mix\\tPipeWire\\n");
+    wait("recording", || rig.state() == "recording" && rig.marker());
+    let new_dir = rig.root.join("rec2");
+    rig.switch(|c| c.rec_dir = new_dir.clone());
+    wait("gsr restart", || rig.pids() == 2);
+    // the fake gsr-cli always writes Video_* into <root>/rec, i.e. the old rec_dir
+    assert_eq!(
+        rig.names("rec_").len(),
+        1,
+        "Video_ must be renamed in the old rec_dir"
+    );
     rig.stop();
 }
 

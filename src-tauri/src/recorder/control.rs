@@ -66,6 +66,8 @@ pub struct Control {
     pub sock: PathBuf,
     pub status: Mutex<Status>,
     pub paused: AtomicBool,
+    /// Startup config was invalid: stay paused (Resume refused) until a reload succeeds.
+    pub config_hold: AtomicBool,
     pub reload: AtomicBool,
     pub shutdown: AtomicBool,
     save_inflight: AtomicBool,
@@ -96,6 +98,7 @@ impl Control {
                 ..Default::default()
             }),
             paused: AtomicBool::new(false),
+            config_hold: AtomicBool::new(false),
             reload: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             save_inflight: AtomicBool::new(false),

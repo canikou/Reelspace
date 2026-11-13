@@ -66,9 +66,12 @@ impl Service {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     fn resume(&self) {
-        self.0
-            .paused
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        // Refused while the startup config is invalid: only a successful reload lifts the hold.
+        if !self.0.config_hold.load(std::sync::atomic::Ordering::SeqCst) {
+            self.0
+                .paused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     }
     fn reload_config(&self) {
         self.0
