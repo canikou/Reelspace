@@ -158,8 +158,12 @@ impl Config {
         }
         // The prune target is budget minus one chunk; a budget <= one chunk would delete every recording.
         let chunk = chunk_bytes(self.bitrate_kbps, self.chunk_sec);
+        // cap_gb is ignored while max_storage_gb is set, so a stale small cap_gb must not block startup.
         for (name, gb) in [
-            ("cap_gb", Some(self.cap_gb)),
+            (
+                "cap_gb",
+                self.max_storage_gb.is_none().then_some(self.cap_gb),
+            ),
             ("max_storage_gb", self.max_storage_gb),
         ] {
             if gb.is_some_and(|gb| gb.saturating_mul(GB) <= chunk) {
@@ -346,6 +350,16 @@ mod tests {
         };
         assert!(with(4).validate().unwrap_err().contains("cap_gb"));
         assert!(with(5).validate().is_ok());
+    }
+
+    #[test]
+    fn stale_small_cap_is_ignored_in_budget_mode() {
+        let c = Config {
+            cap_gb: 4,
+            max_storage_gb: Some(50),
+            ..Config::default()
+        };
+        assert!(c.validate().is_ok());
     }
 
     #[test]

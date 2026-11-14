@@ -153,7 +153,7 @@ impl Database {
     pub(crate) fn set_remote_processing(&self, job_id: &str, remote_id: &str) -> AppResult<()> {
         let now = Utc::now().timestamp();
         self.conn()?.execute(
-            "UPDATE upload_jobs SET provider_remote_id = ?1, bytes_uploaded = total_bytes, state = 'processing_remote', next_attempt_at = ?2, error = NULL, updated_at = ?3 WHERE id = ?4",
+            "UPDATE upload_jobs SET provider_remote_id = ?1, bytes_uploaded = total_bytes, state = 'processing_remote', attempts = 0, next_attempt_at = ?2, error = NULL, updated_at = ?3 WHERE id = ?4",
             params![remote_id, now + 30, now, job_id],
         )?;
         Ok(())
@@ -186,9 +186,13 @@ impl Database {
         delay_seconds: i64,
     ) -> AppResult<()> {
         let now = Utc::now().timestamp();
+        // The attempt cap is checked here against the live DB value (set_upload_progress may have reset it
+        // since the claim). A successful verify poll ('processing_remote') is not a failed attempt.
         self.conn()?.execute(
-            "UPDATE upload_jobs SET state = ?1, error = ?2, next_attempt_at = ?3, updated_at = ?4 WHERE id = ?5",
-            params![state, message, now + delay_seconds, now, work.id],
+            "UPDATE upload_jobs SET state = CASE WHEN ?1 = 'retry' AND attempts >= ?6 THEN 'failed' ELSE ?1 END,
+             attempts = CASE WHEN ?1 = 'processing_remote' THEN 0 ELSE attempts END,
+             error = ?2, next_attempt_at = ?3, updated_at = ?4 WHERE id = ?5",
+            params![state, message, now + delay_seconds, now, work.id, MAX_UPLOAD_ATTEMPTS],
         )?;
         Ok(())
     }
@@ -271,9 +275,7 @@ pub(crate) fn start_youtube_worker(state: AppState) {
                             "needs_sign_in"
                         } else if error.message.contains("allowance") {
                             "waiting_for_quota"
-                        } else if is_permanent_upload_error(&error)
-                            || work.attempts + 1 >= MAX_UPLOAD_ATTEMPTS
-                        {
+                        } else if is_permanent_upload_error(&error) {
                             "failed"
                         } else {
                             "retry"
@@ -656,6 +658,9 @@ fn receive_oauth_callback(listener: TcpListener) -> AppResult<(String, String)> 
     listener.set_nonblocking(true)?;
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
+        if Instant::now() >= deadline {
+            return Err(user_error("Google authorization timed out"));
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
                 // Accepted sockets inherit non-blocking mode on some platforms; bound each read instead.
@@ -702,13 +707,8 @@ fn receive_oauth_callback(listener: TcpListener) -> AppResult<(String, String)> 
                     .ok_or_else(|| user_error("Google did not return the OAuth session state"))?;
                 return Ok((code, state));
             }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(100))
-            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(user_error("Google authorization timed out"))
+                std::thread::sleep(Duration::from_millis(100))
             }
             Err(error) => return Err(error.into()),
         }
@@ -954,6 +954,78 @@ mod tests {
             .expect("bump");
         db.set_upload_progress("j", 100).expect("no progress");
         assert_eq!(attempts(&db), 3);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn attempt_cap_uses_live_attempts_and_verify_polls_do_not_count() {
+        let path =
+            std::env::temp_dir().join(format!("reelspace-yt-cap-{}.sqlite", std::process::id()));
+        let db = Database::open(path.clone()).expect("database");
+        {
+            let conn = db.conn().expect("conn");
+            conn.execute(
+                "INSERT INTO media (id, kind, path, filename, file_size, duration_seconds, tags_json, created_at, modified_at) VALUES ('m', 'raw', 'p', 'f.mp4', 1, 1.0, '[]', 1, 1)",
+                [],
+            )
+            .expect("media");
+            conn.execute(
+                "INSERT INTO upload_jobs (id, media_id, provider, state, attempts, created_at, updated_at) VALUES ('j', 'm', 'youtube', 'queued', 7, 1, 1)",
+                [],
+            )
+            .expect("job");
+        }
+        let row = |db: &Database| -> (String, i64) {
+            db.conn()
+                .expect("conn")
+                .query_row(
+                    "SELECT state, attempts FROM upload_jobs WHERE id = 'j'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("row")
+        };
+        let requeue = |db: &Database, attempts: i64| {
+            db.conn()
+                .expect("conn")
+                .execute(
+                    "UPDATE upload_jobs SET state = 'queued', attempts = ?1, next_attempt_at = 0",
+                    [attempts],
+                )
+                .expect("requeue");
+        };
+
+        // Progress after the claim resets attempts, so the error is a plain retry.
+        let work = db.claim_archive_work().expect("claim").expect("work");
+        assert_eq!(row(&db).1, 8);
+        db.set_upload_progress("j", 100).expect("progress");
+        db.reschedule_archive(&work, "retry", "boom", 0)
+            .expect("reschedule");
+        assert_eq!(row(&db), ("retry".to_string(), 0));
+
+        // No progress: the cap is reached and the job fails.
+        requeue(&db, 7);
+        let work = db.claim_archive_work().expect("claim").expect("work");
+        db.reschedule_archive(&work, "retry", "boom", 0)
+            .expect("reschedule");
+        assert_eq!(row(&db), ("failed".to_string(), 8));
+
+        // Remote processing and each successful verify poll reset attempts.
+        requeue(&db, 7);
+        db.set_remote_processing("j", "vid").expect("processing");
+        assert_eq!(row(&db), ("processing_remote".to_string(), 0));
+        db.conn()
+            .expect("conn")
+            .execute(
+                "UPDATE upload_jobs SET attempts = 5, next_attempt_at = 0",
+                [],
+            )
+            .expect("bump");
+        let work = db.claim_archive_work().expect("claim").expect("work");
+        db.reschedule_archive(&work, "processing_remote", "still processing", 0)
+            .expect("reschedule");
+        assert_eq!(row(&db), ("processing_remote".to_string(), 0));
         drop(db);
         let _ = std::fs::remove_file(path);
     }

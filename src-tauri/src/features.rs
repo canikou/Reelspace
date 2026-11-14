@@ -394,7 +394,13 @@ impl Database {
             ),
             _ => return Err(user_error("unknown upload queue action")),
         };
-        let sql = format!("UPDATE upload_jobs SET state = '{state}', error = NULL, next_attempt_at = 0, updated_at = {now} WHERE {where_clause}");
+        // A user resume/retry starts a fresh attempt budget; otherwise a failed job fails again on its first error.
+        let reset = if state == "queued" {
+            "attempts = 0, "
+        } else {
+            ""
+        };
+        let sql = format!("UPDATE upload_jobs SET state = '{state}', {reset}error = NULL, next_attempt_at = 0, updated_at = {now} WHERE {where_clause}");
         if action.ends_with("All") {
             conn.execute(&sql, [])?;
         } else {

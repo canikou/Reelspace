@@ -628,7 +628,9 @@ fn is_single_component(value: &str) -> bool {
     let mut components = Path::new(value).components();
     matches!(components.next(), Some(Component::Normal(_)))
         && components.next().is_none()
-        && !value.contains(['/', '\\'])
+        && !value.contains('/')
+        // A backslash is a legal filename character outside Windows.
+        && !(cfg!(windows) && value.contains('\\'))
 }
 
 fn validate_item(item: &ArchiveItem) -> AppResult<()> {
@@ -1547,16 +1549,16 @@ mod tests {
     #[test]
     fn item_filename_and_id_must_be_single_path_components() {
         assert!(validate_item(&archive_item()).is_ok());
-        for bad in [
-            "",
-            ".",
-            "..",
-            "..\\..\\x",
-            "a/b",
-            "C:\\x",
-            "\\\\srv\\share",
-            "/abs",
-        ] {
+        let mut bad_values = vec!["", ".", "..", "a/b", "/abs"];
+        if cfg!(windows) {
+            bad_values.extend(["..\\..\\x", "C:\\x", "\\\\srv\\share"]);
+        } else {
+            // A backslash is an ordinary filename character on Linux.
+            let mut backslash = archive_item();
+            backslash.filename = "a\\b.mp4".into();
+            assert!(validate_item(&backslash).is_ok());
+        }
+        for bad in bad_values {
             let mut bad_filename = archive_item();
             bad_filename.filename = bad.into();
             assert!(validate_item(&bad_filename).is_err(), "filename {bad:?}");
