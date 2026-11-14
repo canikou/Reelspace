@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { normalizeAppError } from "../lib/api";
 import type { Collection, MediaItem } from "../lib/types";
 import { Dialog } from "./Dialog";
 import { AppIcon } from "./icons";
@@ -28,7 +29,7 @@ export function CollectionPickerDialog({
     try {
       await onPick(collection);
     } catch (reason) {
-      setError(String(reason));
+      setError(normalizeAppError(reason).message);
       setBusyId(null);
       inFlight.current = false;
     }

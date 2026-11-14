@@ -12,6 +12,12 @@ export interface UpdateViewState {
   error?: string;
 }
 
+// A background check must never hide an update the user already sees.
+export function keepPendingUpdate(current: UpdateViewState, next: UpdateViewState, manual: boolean): UpdateViewState {
+  const pending = current.phase === "available" || current.phase === "downloading" || current.phase === "downloaded" || current.phase === "installing";
+  return !manual && pending ? current : next;
+}
+
 let pendingUpdate: Update | null = null;
 let checkedThisSession = false;
 

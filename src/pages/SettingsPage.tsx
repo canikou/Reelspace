@@ -18,11 +18,11 @@ type Values = {
   recordingApp: string; archiveRecordings: boolean; archiveClips: boolean; keepLocalClips: boolean; pauseUploads: boolean;
 };
 
-const fromSettings = (s: AppSettings): Values => ({
+export const fromSettings = (s: AppSettings): Values => ({
   sourceFolders: s.sourceFolders.join("\n"),
   workingFolder: s.workingFolder ?? "",
   clipFolder: s.clipFolder ?? "",
-  limitGb: s.storageLimitBytes ? String(Math.round(s.storageLimitBytes / GB)) : "",
+  limitGb: s.storageLimitBytes ? String(+(s.storageLimitBytes / GB).toFixed(2)) : "",
   threshold: String(s.cleanupThresholdPercent),
   theme: s.theme ?? "system",
   checkUpdates: s.automaticallyCheckUpdates ?? true,
@@ -37,11 +37,11 @@ const fromSettings = (s: AppSettings): Values => ({
 
 export const settingsFingerprint = (s: AppSettings) => JSON.stringify(s);
 
-const toSettings = (v: Values): AppSettings => ({
+export const toSettings = (v: Values): AppSettings => ({
   sourceFolders: v.sourceFolders.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
   workingFolder: v.workingFolder.trim() || null,
   clipFolder: v.clipFolder.trim() || null,
-  storageLimitBytes: v.limitGb ? Number(v.limitGb) * GB : null,
+  storageLimitBytes: v.limitGb ? Math.round(Number(v.limitGb) * GB) : null,
   cleanupThresholdPercent: Math.max(50, Math.min(99, Number(v.threshold) || 90)),
   theme: v.theme,
   automaticallyCheckUpdates: v.checkUpdates,
@@ -76,6 +76,7 @@ export function SettingsPage({
   const [v, setV] = useState<Values>(() => fromSettings(snapshot.settings));
   const up = (patch: Partial<Values>) => setV((current) => ({ ...current, ...patch }));
   const [youtubeBusy, setYouTubeBusy] = useState(false);
+  const [repairBusy, setRepairBusy] = useState(false);
   const [maintenanceStatus, setMaintenanceStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -150,11 +151,52 @@ export function SettingsPage({
   }
 
   async function addSourceFolder() {
-    const folder = await pickFolder();
-    if (!folder) return;
-    const existing = v.sourceFolders.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    if (!existing.some((value) => value.toLowerCase() === folder.toLowerCase())) {
-      up({ sourceFolders: [...existing, folder].join("\n") });
+    try {
+      const folder = await pickFolder();
+      if (!folder) return;
+      const existing = v.sourceFolders.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (!existing.some((value) => value.toLowerCase() === folder.toLowerCase())) {
+        up({ sourceFolders: [...existing, folder].join("\n") });
+      }
+    } catch (reason) {
+      setError(normalizeAppError(reason).message);
+    }
+  }
+
+  async function chooseFolder(field: "workingFolder" | "clipFolder") {
+    try {
+      const folder = await pickFolder();
+      if (folder) up({ [field]: folder });
+    } catch (reason) {
+      setError(normalizeAppError(reason).message);
+    }
+  }
+
+  async function exportDiagnostics() {
+    try {
+      const path = await pickDiagnosticsExport();
+      if (!path) return;
+      await api.exportDiagnostics(path);
+      setMaintenanceStatus("Sanitized diagnostics exported");
+    } catch (reason) {
+      setError(normalizeAppError(reason).message);
+    }
+  }
+
+  async function repairLibrary() {
+    if (repairBusy) return;
+    setRepairBusy(true);
+    setMaintenanceStatus("Repairing library…");
+    try {
+      await api.scanSources();
+      await api.repairThumbnails();
+      const summary = await api.repairLibrary();
+      setMaintenanceStatus(`Repair complete: ${summary.missingLocalFiles} missing local, ${summary.preservedRemoteOnlyItems} preserved remote-only.`);
+    } catch (reason) {
+      setError(normalizeAppError(reason).message);
+      setMaintenanceStatus(null);
+    } finally {
+      setRepairBusy(false);
     }
   }
 
@@ -252,19 +294,19 @@ export function SettingsPage({
             <SettingRow label="Working folder" help="Optional." htmlFor="set-working" stack>
               <div className="inline-pick">
                 <input id="set-working" value={v.workingFolder} onChange={(event) => up({ workingFolder: event.target.value })} />
-                <button className="secondary-button" onClick={async () => { const f = await pickFolder(); if (f) up({ workingFolder: f }); }} title="Choose working folder">Choose</button>
+                <button className="secondary-button" onClick={() => chooseFolder("workingFolder")} title="Choose working folder">Choose</button>
               </div>
             </SettingRow>
             <SettingRow label="Clip folder" help="Defaults to the working folder." htmlFor="set-clips" stack>
               <div className="inline-pick">
                 <input id="set-clips" value={v.clipFolder} onChange={(event) => up({ clipFolder: event.target.value })} />
-                <button className="secondary-button" onClick={async () => { const f = await pickFolder(); if (f) up({ clipFolder: f }); }} title="Choose clip folder">Choose</button>
+                <button className="secondary-button" onClick={() => chooseFolder("clipFolder")} title="Choose clip folder">Choose</button>
               </div>
             </SettingRow>
           </SettingsGroup>
           <SettingsGroup title="Storage">
             <SettingRow label="Storage limit (GB)" help={`Optional. Current managed usage: ${formatBytes(snapshot.stats.managedBytes)}.`} htmlFor="set-limit">
-              <input id="set-limit" type="number" min="1" value={v.limitGb} onChange={(event) => up({ limitGb: event.target.value })} inputMode="numeric" />
+              <input id="set-limit" type="number" min="0.01" step="any" value={v.limitGb} onChange={(event) => up({ limitGb: event.target.value })} inputMode="decimal" />
             </SettingRow>
             <SettingRow label="Cleanup warning threshold (%)" help="Warn when managed storage passes this share of the limit." htmlFor="set-threshold">
               <input id="set-threshold" type="number" min="50" max="99" value={v.threshold} onChange={(event) => up({ threshold: event.target.value })} inputMode="numeric" />
@@ -328,10 +370,10 @@ export function SettingsPage({
               <button className="secondary-button" onClick={() => api.openDiagnosticsFolder().catch((reason) => setError(normalizeAppError(reason).message))}><AppIcon name="search" size={17} /> Open log folder</button>
             </SettingRow>
             <SettingRow label="Diagnostic report" help="Export a sanitized report you can share.">
-              <button className="secondary-button" onClick={async () => { const path = await pickDiagnosticsExport(); if (!path) return; try { await api.exportDiagnostics(path); setMaintenanceStatus("Sanitized diagnostics exported"); } catch (reason) { setError(normalizeAppError(reason).message); } }}><AppIcon name="download" size={17} /> Export diagnostic report</button>
+              <button className="secondary-button" onClick={exportDiagnostics}><AppIcon name="download" size={17} /> Export diagnostic report</button>
             </SettingRow>
             <SettingRow label="Repair library" help="Rescan sources, rebuild thumbnails, and reconcile missing files.">
-              <button className="secondary-button" onClick={async () => { setMaintenanceStatus("Repairing library…"); try { await api.scanSources(); await api.repairThumbnails(); const summary = await api.repairLibrary(); setMaintenanceStatus(`Repair complete: ${summary.missingLocalFiles} missing local, ${summary.preservedRemoteOnlyItems} preserved remote-only.`); } catch (reason) { setError(normalizeAppError(reason).message); setMaintenanceStatus(null); } }}><AppIcon name="repair" size={17} /> Refresh and repair library</button>
+              <button className="secondary-button" onClick={repairLibrary} disabled={repairBusy}><AppIcon name="repair" size={17} /> Refresh and repair library</button>
             </SettingRow>
             {maintenanceStatus ? <p className="data-status" role="status">{maintenanceStatus}</p> : null}
           </SettingsGroup>

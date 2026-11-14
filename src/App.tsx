@@ -14,7 +14,7 @@ import { api, normalizeAppError } from "./lib/api";
 import { pickFolder } from "./lib/dialog";
 import { formatBytes } from "./lib/format";
 import type { AppSnapshot, ArchiveAccount, Collection, Game, MediaItem, RecorderApp, UploadJob } from "./lib/types";
-import { checkForUpdate, dismissUpdate, downloadUpdate, installUpdate, type UpdateViewState } from "./lib/updater";
+import { checkForUpdate, dismissUpdate, downloadUpdate, installUpdate, keepPendingUpdate, type UpdateViewState } from "./lib/updater";
 import { ClipsPage } from "./pages/ClipsPage";
 import { CollectionsPage } from "./pages/CollectionsPage";
 import { GalleryPage } from "./pages/GalleryPage";
@@ -118,10 +118,10 @@ export function App() {
   }, [snapshot?.settings.theme]);
 
   const runUpdateCheck = useCallback(async (manual = false) => {
-    setUpdateState({ phase: "checking" });
+    setUpdateState((current) => keepPendingUpdate(current, { phase: "checking" }, manual));
     try {
       const next = await checkForUpdate({ manual, includePrerelease: snapshot?.settings.includePrereleaseUpdates ?? true });
-      setUpdateState(next);
+      setUpdateState((current) => keepPendingUpdate(current, next, manual));
       if (next.phase === "available" && snapshot?.settings.automaticallyDownloadUpdates) {
         setUpdateState(await downloadUpdate(setUpdateState));
       }
@@ -130,7 +130,7 @@ export function App() {
       const message = /fallback platforms/i.test(raw)
         ? "In-app updates are only available for the installer and AppImage builds. Download the newer package from GitHub Releases."
         : raw || "The update channel could not be reached";
-      setUpdateState(manual ? { phase: "error", version: snapshot?.version, error: message } : { phase: "idle" });
+      setUpdateState((current) => keepPendingUpdate(current, manual ? { phase: "error", version: snapshot?.version, error: message } : { phase: "idle" }, manual));
     }
   }, [snapshot?.settings.automaticallyDownloadUpdates, snapshot?.settings.includePrereleaseUpdates, snapshot?.version]);
 
@@ -166,8 +166,7 @@ export function App() {
     if (!force && Date.now() - lastScanAt.current < 60_000) return;
     if (!rootsKey) return;
     scanInFlight.current = true;
-    if (!silent) setBusy(true);
-    setError(null);
+    if (!silent) { setBusy(true); setError(null); }
     try {
       await api.scanSources();
       lastScanAt.current = Date.now();
@@ -275,6 +274,7 @@ export function App() {
             try { setUpdateState(await downloadUpdate(setUpdateState)); }
             catch (reason) { setUpdateState((current) => ({ ...current, phase: "error", error: reason instanceof Error ? reason.message : "Update download failed" })); }
           }}
+          onRetry={() => runUpdateCheck(true)}
           onInstall={() => installUpdate().catch(showError)}
           onLater={() => { dismissUpdate(updateState.version).catch(() => undefined); setUpdateState({ phase: "idle" }); }}
           onSkip={() => { dismissUpdate(updateState.version, true).catch(() => undefined); setUpdateState({ phase: "idle" }); }}
