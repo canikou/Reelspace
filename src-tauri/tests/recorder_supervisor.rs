@@ -291,7 +291,8 @@ fn disk_floor_blocks_recording_but_keeps_replay() {
 #[test]
 fn invalid_reload_keeps_last_good_config() {
     let rig = Rig::new(|_| {}, "1\\tRec_Mix\\tPipeWire\\n");
-    wait("recording", || rig.state() == "recording");
+    // wait for begin_recording too: it sets "recording" and would overwrite an earlier "error"
+    wait("recording", || rig.state() == "recording" && rig.marker());
     std::fs::write(&rig.ctl.cfg_path, br#"{"min_free_gb":1}"#).unwrap();
     rig.ctl.reload.store(true, SeqCst);
     wait("rejected", || {
@@ -309,7 +310,8 @@ fn invalid_reload_keeps_last_good_config() {
 #[test]
 fn good_reload_clears_rejected_error_state() {
     let rig = Rig::new(|_| {}, "1\\tRec_Mix\\tPipeWire\\n");
-    wait("recording", || rig.state() == "recording");
+    // wait for begin_recording too: it sets "recording" and would overwrite an earlier "error"
+    wait("recording", || rig.state() == "recording" && rig.marker());
     std::fs::write(&rig.ctl.cfg_path, br#"{"min_free_gb":1}"#).unwrap();
     rig.ctl.reload.store(true, SeqCst);
     wait("rejected", || rig.state() == "error");
