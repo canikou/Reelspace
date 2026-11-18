@@ -64,6 +64,9 @@ Terra changed after this handoff was written. Terra was wiped on 2026-11-17, and
 
 ## Decisions waiting on the maintainer
 
+0. **Taken in away mode (2026-11-18):** I opened **draft** PR #4 (`fix/handoff-open-items` → `master`) so CI can run the full fmt/clippy/test matrix on Windows and Linux. It is not merged. To undo: close the PR; the branches stay.
+   - Queued for your return: `scripts/test-release-media.ps1` and the Windows job-object check. Both need Windows, and Terra Omega has no hub link.
+
 1. **Merging this branch.** Recommended: review the commits, then open a PR to `master`.
 2. **Finding 6.** A stable release writes `latest.json` only to `updater-stable`, but the app polls `updater-alpha` (`release.yml:316-331`).
    - Recommended: also publish to `updater-alpha` while in alpha.
