@@ -62,10 +62,17 @@ impl Service {
     }
     fn pause(&self) {
         self.0
+            .user_paused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0
             .paused
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     fn resume(&self) {
+        // Remembered even during the hold: the reload that lifts it then resumes.
+        self.0
+            .user_paused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         // Refused while the startup config is invalid: only a successful reload lifts the hold.
         if !self.0.config_hold.load(std::sync::atomic::Ordering::SeqCst) {
             self.0

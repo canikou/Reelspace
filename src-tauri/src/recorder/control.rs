@@ -68,6 +68,9 @@ pub struct Control {
     pub paused: AtomicBool,
     /// Startup config was invalid: stay paused (Resume refused) until a reload succeeds.
     pub config_hold: AtomicBool,
+    /// Last Pause/Resume from the user. Restored when a good reload lifts `config_hold`,
+    /// so a Pause sent during the hold is not undone by the reload.
+    pub user_paused: AtomicBool,
     pub reload: AtomicBool,
     pub shutdown: AtomicBool,
     save_inflight: AtomicBool,
@@ -99,6 +102,7 @@ impl Control {
             }),
             paused: AtomicBool::new(false),
             config_hold: AtomicBool::new(false),
+            user_paused: AtomicBool::new(false),
             reload: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             save_inflight: AtomicBool::new(false),

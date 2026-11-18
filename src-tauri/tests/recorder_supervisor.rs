@@ -149,6 +149,37 @@ esac"#
     }
 }
 
+/// Runs on panic too: stop the supervisor and kill any fake gsr this rig started, so a
+/// failed test does not leave processes behind (they can hold a test-output pipe open).
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.ctl.shutdown.store(true, SeqCst);
+        if let Some(h) = self.handle.take() {
+            let end = Instant::now() + Duration::from_secs(5);
+            while !h.is_finished() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            }
+        }
+        let gsr = self.root.join("bin/gpu-screen-recorder");
+        let gsr = gsr.to_string_lossy();
+        let pids = std::fs::read_to_string(self.root.join("pids")).unwrap_or_default();
+        for pid in pids.lines().map(str::trim).filter(|p| !p.is_empty()) {
+            // only a pid that is still this rig's fake gsr (pids can be reused)
+            let ours = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|c| String::from_utf8_lossy(&c).contains(gsr.as_ref()))
+                .unwrap_or(false);
+            if ours {
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", pid])
+                    .status();
+            }
+        }
+    }
+}
+
 #[test]
 fn rolling_manual_session_clip_and_shutdown() {
     let rig = Rig::new(|_| {}, "1\\tRec_Mix\\tPipeWire\\n");
@@ -345,6 +376,29 @@ fn startup_config_hold_stays_paused_until_good_reload() {
     assert!(!rig.ctl.config_hold.load(SeqCst));
     assert!(rig.ctl.status.lock().unwrap().last_error.is_empty());
     assert_eq!(rig.pids(), 2);
+    rig.stop();
+}
+
+#[test]
+fn pause_during_config_hold_survives_good_reload() {
+    let rig = Rig::new(|_| {}, "1\\tRec_Mix\\tPipeWire\\n");
+    wait("recording", || rig.state() == "recording");
+    rig.ctl.status.lock().unwrap().last_error = "config rejected: test".into();
+    rig.ctl.config_hold.store(true, SeqCst);
+    rig.ctl.paused.store(true, SeqCst);
+    // what the D-Bus Pause method does
+    rig.ctl.user_paused.store(true, SeqCst);
+    wait("paused", || rig.state() == "paused");
+    rig.switch(|_| {});
+    wait("hold lifted", || !rig.ctl.config_hold.load(SeqCst));
+    assert!(
+        rig.ctl.paused.load(SeqCst),
+        "user's Pause must survive the reload"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(rig.state(), "paused");
+    assert_eq!(rig.pids(), 1, "gsr must stay stopped while paused");
+    assert!(rig.ctl.status.lock().unwrap().last_error.is_empty());
     rig.stop();
 }
 

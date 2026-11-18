@@ -34,10 +34,33 @@ Where it stopped: all fixes are verified, and the work waits on the maintainer's
 1. Run `scripts/test-release-media.ps1` on this branch's HEAD (Windows). It last passed at `d2d0cd9`.
 2. Get the maintainer's decisions below. Then open a PR from this branch to `master`.
 3. Remaining open items:
-   - Finding 17 (partial): orphaned ffmpeg processes are not killed when the app exits. Orphaned `.reelspace-part` files are already swept at startup.
-   - `daemon.rs:225`: a good config reload clears `paused`, even if the user paused during the startup config hold.
-   - Test harness: when a recorder test panics, its fake `gpu-screen-recorder` process keeps running. `Rig` has no `Drop`.
+   - FIXED on branch `fix/handoff-open-items` (2026-11-18, local, not pushed; see "Update 2026-11-18" below): finding 17 (ffmpeg processes), the `daemon.rs:225` pause bug, and the `Rig` `Drop`.
    - The library card for the smoke fixture showed "No preview". The thumbnail was probably still being generated; this is not confirmed.
+
+## Update 2026-11-18 (Polaris): branch `fix/handoff-open-items`
+
+One commit on top of `handoff/polaris` (76c5739):
+- **Finding 17, ffmpeg processes.** Every ffmpeg/ffprobe child (through `media_command` in `ffmpeg.rs`) is now tied to the app's lifetime, crash included.
+  - Linux: `PR_SET_PDEATHSIG(SIGKILL)` in `pre_exec`. It is safe because each caller waits for the child on the thread that spawned it; PDEATHSIG follows the spawning thread.
+  - Windows: `tie_to_app_lifetime` assigns the child to a process-wide kill-on-close Job Object. This needs the windows-sys features `Win32_Security`, `Win32_System_JobObjects` and `Win32_System_Threading` (added to Cargo.toml; Cargo.lock is unchanged).
+  - The recorder-app launch in `features.rs` is not tied to the app on purpose.
+- **Recorder pause.** A new `Control.user_paused` records the last D-Bus Pause/Resume. A good reload that lifts `config_hold` restores it instead of clearing `paused`. Test: `pause_during_config_hold_survives_good_reload`.
+- **Test harness.** `Rig` now has a `Drop` impl. It signals shutdown, waits up to 5 s, and SIGKILLs any fake gsr from the rig's `pids` file whose `/proc/<pid>/cmdline` is still this rig's script.
+
+Verified on Polaris:
+- `cargo fmt --check` passes.
+- The new `ffmpeg.rs` code was copied into a standalone crate. `clippy -D warnings` is clean for Linux and for `--target x86_64-pc-windows-msvc` (check only, no link).
+- On Linux, a parent that exits leaves no ffmpeg-style child behind.
+- `pnpm test` (31/31) and `tsc --noEmit` pass (no frontend change).
+
+NOT verified (needs the Tauri Linux deps, or Windows):
+- Full-crate clippy and `cargo test --all-targets`, including the new recorder test and `Rig` `Drop`.
+- The Windows job object at runtime.
+- `test-release-media.ps1`.
+
+CI runs only on `master`, `codex/**` and PRs to `master`, so a branch push alone does not test it.
+
+Terra changed after this handoff was written. Terra was wiped on 2026-11-17, and Terra Manager and the `mntc-pc-sol` link are gone. Linux work on Terra now goes through Terra Alpha (CachyOS) and Windows work through Terra Omega. Current ids: `/srv/terra-state/threads.md`. Polaris now has `rustfmt`, `clippy` and the `x86_64-pc-windows-msvc` std installed (user-level rustup).
 
 ## Decisions waiting on the maintainer
 

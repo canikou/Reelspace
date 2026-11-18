@@ -221,9 +221,12 @@ impl Supervisor {
                 self.next_attempt = Instant::now();
                 self.backoff = Duration::from_secs(10);
                 self.last_house = Instant::now() - Duration::from_secs(3600);
-                // a good config lifts the startup hold and clears an earlier rejection
+                // a good config lifts the startup hold and clears an earlier rejection;
+                // a Pause the user sent during the hold stays in effect
                 if self.ctl.config_hold.swap(false, SeqCst) {
-                    self.ctl.paused.store(false, SeqCst);
+                    self.ctl
+                        .paused
+                        .store(self.ctl.user_paused.load(SeqCst), SeqCst);
                 }
                 let rejected = {
                     let mut s = self.ctl.status.lock().unwrap();
