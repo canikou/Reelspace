@@ -60,6 +60,12 @@ NOT verified (needs the Tauri Linux deps, or Windows):
 
 CI runs only on `master`, `codex/**` and PRs to `master`, so a branch push alone does not test it.
 
+CI on draft PR #4 at `bee0694` (2026-11-18): Linux x64 and Windows x64 both PASS. That covers fmt, clippy `-D warnings`, `pnpm test` and `cargo test --all-targets`.
+- Linux: 105 lib, 4 library_faults and 12 recorder_supervisor tests (the new pause test included).
+- Windows: 72 lib and 4 library_faults tests.
+
+Still not done: `test-release-media.ps1`, and a runtime check on Windows that ffmpeg dies when the app is killed.
+
 Terra changed after this handoff was written. Terra was wiped on 2026-11-17, and Terra Manager and the `mntc-pc-sol` link are gone. Linux work on Terra now goes through Terra Alpha (CachyOS) and Windows work through Terra Omega. Current ids: `/srv/terra-state/threads.md`. Polaris now has `rustfmt`, `clippy` and the `x86_64-pc-windows-msvc` std installed (user-level rustup).
 
 ## Decisions waiting on the maintainer
