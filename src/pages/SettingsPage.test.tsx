@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { AppSnapshot } from "../lib/types";
-import { SettingsPage } from "./SettingsPage";
+import { SettingsPage, fromSettings, settingsFingerprint, toSettings } from "./SettingsPage";
 
 const snapshot: AppSnapshot = {
   version: "0.1.1-alpha.1",
@@ -77,5 +77,31 @@ describe("SettingsPage library data controls", () => {
     expect(markup).toContain("Connect YouTube");
     expect(markup).not.toContain("OAuth client ID");
     expect(markup).not.toContain("OAuth client secret");
+  });
+});
+
+describe("SettingsPage form sync", () => {
+  // No DOM in this test env, so the effect dep is tested directly: it must not change when refresh() hands over an equal-content snapshot.
+  it("keeps the same fingerprint for equal settings in a new object and changes it on a real change", () => {
+    const rescanned = { ...snapshot, settings: { ...snapshot.settings, sourceFolders: [...snapshot.settings.sourceFolders] } };
+    expect(settingsFingerprint(rescanned.settings)).toBe(settingsFingerprint(snapshot.settings));
+    expect(settingsFingerprint({ ...snapshot.settings, cleanupThresholdPercent: 80 })).not.toBe(settingsFingerprint(snapshot.settings));
+  });
+});
+
+describe("SettingsPage storage limit", () => {
+  const GB = 1024 * 1024 * 1024;
+
+  it("shows fractional limits without rounding to whole GB", () => {
+    expect(fromSettings({ ...snapshot.settings, storageLimitBytes: 1.5 * GB }).limitGb).toBe("1.5");
+    expect(fromSettings({ ...snapshot.settings, storageLimitBytes: 400 * 1024 * 1024 }).limitGb).toBe("0.39");
+    expect(fromSettings({ ...snapshot.settings, storageLimitBytes: 10 * GB }).limitGb).toBe("10");
+  });
+
+  it("round-trips a saved limit and always saves whole bytes", () => {
+    const saved = toSettings({ ...fromSettings(snapshot.settings), limitGb: "1.5" });
+    expect(saved.storageLimitBytes).toBe(1.5 * GB);
+    expect(toSettings(fromSettings(saved)).storageLimitBytes).toBe(1.5 * GB);
+    expect(Number.isInteger(toSettings({ ...fromSettings(snapshot.settings), limitGb: "0.1" }).storageLimitBytes)).toBe(true);
   });
 });

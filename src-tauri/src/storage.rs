@@ -1,17 +1,7 @@
-use crate::models::{AppSettings, MediaItem, MediaKind, StorageStats};
+use crate::models::{AppSettings, StorageStats};
 use std::path::Path;
 
-pub fn stats(items: &[MediaItem], settings: &AppSettings) -> StorageStats {
-    let raw_bytes = items
-        .iter()
-        .filter(|item| item.kind == MediaKind::Raw)
-        .map(|item| item.file_size)
-        .sum();
-    let clip_bytes = items
-        .iter()
-        .filter(|item| item.kind == MediaKind::Clip)
-        .map(|item| item.file_size)
-        .sum();
+pub fn stats(raw_bytes: u64, clip_bytes: u64, settings: &AppSettings) -> StorageStats {
     let managed_bytes = raw_bytes + clip_bytes;
     let (drive_total_bytes, drive_available_bytes) = storage_anchor(settings)
         .and_then(drive_space)
@@ -34,16 +24,6 @@ pub fn stats(items: &[MediaItem], settings: &AppSettings) -> StorageStats {
         storage_limit_bytes: settings.storage_limit_bytes,
         is_near_limit,
     }
-}
-
-pub fn cleanup_candidates(items: &[MediaItem]) -> Vec<MediaItem> {
-    let mut candidates = items
-        .iter()
-        .filter(|item| item.kind == MediaKind::Raw)
-        .cloned()
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|item| item.created_at);
-    candidates
 }
 
 fn storage_anchor(settings: &AppSettings) -> Option<&Path> {

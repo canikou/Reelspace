@@ -84,6 +84,7 @@ pub fn run() -> error::AppResult<()> {
                     "exportJobCapacity": 1,
                 }),
             );
+            sweep_orphan_export_parts(&state);
             let worker_state = state.clone();
             let archive_worker_state = state.clone();
             let watcher_state = state.clone();
@@ -116,8 +117,6 @@ pub fn run() -> error::AppResult<()> {
             import_library_data,
             create_clip,
             reveal_in_explorer,
-            get_storage_stats,
-            get_cleanup_candidates,
             delete_raw_file,
             list_games,
             create_game,

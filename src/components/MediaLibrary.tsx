@@ -41,7 +41,7 @@ export function MediaLibrary({
   }, [items, query, sort]);
   useEffect(() => {
     setVisibleLimit(MEDIA_RENDER_PAGE_SIZE);
-  }, [items, query, sort, view]);
+  }, [query, sort, view]);
   const rendered = visible.slice(0, visibleLimit);
   const remaining = visible.length - rendered.length;
 

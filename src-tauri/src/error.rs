@@ -88,6 +88,10 @@ impl AppError {
         }
     }
 
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
@@ -127,7 +131,12 @@ impl From<std::io::Error> for AppError {
             std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
                 (ErrorCode::InvalidPath, "The file path is invalid")
             }
-            _ if error.raw_os_error() == Some(112) => {
+            std::io::ErrorKind::StorageFull => {
+                (ErrorCode::DiskFull, "There is not enough free disk space")
+            }
+            _ if error.raw_os_error() == Some(112)
+                || (cfg!(unix) && error.raw_os_error() == Some(28)) =>
+            {
                 (ErrorCode::DiskFull, "There is not enough free disk space")
             }
             _ => (ErrorCode::Internal, "A local file operation failed"),
@@ -317,6 +326,8 @@ mod tests {
         }
         let disk_full = AppError::from(std::io::Error::from_raw_os_error(112));
         assert_eq!(disk_full.code, ErrorCode::DiskFull);
+        let storage_full = AppError::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        assert_eq!(storage_full.code, ErrorCode::DiskFull);
     }
 
     #[test]

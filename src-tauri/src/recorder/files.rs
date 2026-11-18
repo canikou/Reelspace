@@ -97,7 +97,9 @@ pub fn select_cap_prune(files: &[FileInfo], cap_bytes: u64, headroom: u64) -> Ve
     let target = cap_bytes.saturating_sub(headroom);
     let mut total = rec_total(files);
     let mut out = vec![];
-    for f in oldest_first(files, is_rec_name) {
+    let order = oldest_first(files, is_rec_name);
+    // Never the newest rec_* file, even when target is 0 (cap <= headroom).
+    for f in order.iter().take(order.len().saturating_sub(1)) {
         if total <= target {
             break;
         }
@@ -202,7 +204,9 @@ pub fn select_budget_prune(files: &[FileInfo], budget: u64, headroom: u64) -> Ve
     let target = budget.saturating_sub(headroom);
     let mut total: u64 = files.iter().map(|f| f.size).sum();
     let mut out = vec![];
-    for f in oldest_first_all(files) {
+    let order = oldest_first_all(files);
+    // Never the newest recording, even when target is 0 (budget <= headroom).
+    for f in order.iter().take(order.len().saturating_sub(1)) {
         if total <= target {
             break;
         }
@@ -480,9 +484,9 @@ mod tests {
             ]
         );
         assert!(select_cap_prune(&files, 1000, 100).is_empty());
-        // headroom larger than cap deletes all rec_ but nothing else
+        // headroom larger than cap deletes all rec_ but the newest, and nothing else
         let all = select_cap_prune(&files, 100, 500);
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 2);
         assert!(all
             .iter()
             .all(|p| is_rec_name(p.file_name().unwrap().to_str().unwrap())));
@@ -581,6 +585,69 @@ mod tests {
         ] {
             assert!(r.join(keep).exists(), "{keep}");
         }
+    }
+
+    #[test]
+    fn budget_prune_never_selects_newest() {
+        let files = vec![
+            fi("session_A_2026-01-03_00-00-00.mkv", 100, 1),
+            fi("rec_2026-01-01_00-00-00.mkv", 100, 3),
+            fi("rec_2026-01-02_00-00-00.mkv", 100, 2),
+        ];
+        let want = vec![
+            PathBuf::from("/r/rec_2026-01-01_00-00-00.mkv"),
+            PathBuf::from("/r/rec_2026-01-02_00-00-00.mkv"),
+        ];
+        // target 0, and budget smaller than headroom (saturates to 0)
+        assert_eq!(select_budget_prune(&files, 0, 0), want);
+        assert_eq!(select_budget_prune(&files, 10, 4_500_000_000), want);
+        assert!(select_budget_prune(&files[..1], 0, 0).is_empty());
+        assert!(select_budget_prune(&[], 0, 0).is_empty());
+    }
+
+    #[test]
+    fn cap_prune_never_selects_newest_rec() {
+        let files = vec![
+            fi("rec_2026-01-02_00-00-00.mkv", 100, 2),
+            fi("rec_2026-01-01_00-00-00.mkv", 100, 3),
+            fi("rec_2026-01-03_00-00-00.mkv", 100, 1),
+        ];
+        let want = vec![
+            PathBuf::from("/r/rec_2026-01-01_00-00-00.mkv"),
+            PathBuf::from("/r/rec_2026-01-02_00-00-00.mkv"),
+        ];
+        assert_eq!(select_cap_prune(&files, 0, 0), want);
+        assert_eq!(select_cap_prune(&files, 10, 4_500_000_000), want);
+        assert!(select_cap_prune(&files[..1], 0, 0).is_empty());
+    }
+
+    #[test]
+    fn delete_checked_only_removes_matching_names() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        let rec = "rec_2026-01-01_00-00-00.mkv";
+        let ses = "session_G_2026-01-01_00-00-00.mkv";
+        let others = [
+            "Video_2026-01-01_00-00-00.mkv",
+            "clip_2026-01-01_00-00-00.mp4",
+            "notes.mkv",
+            "rec_x.mkv",
+        ];
+        for n in others.iter().chain(&[rec, ses]) {
+            std::fs::write(r.join(n), vec![0u8; 10]).unwrap();
+        }
+        let all: Vec<PathBuf> = others
+            .iter()
+            .chain(&[rec, ses])
+            .map(|n| r.join(n))
+            .collect();
+        assert_eq!(delete_checked(&all), 20);
+        assert!(!r.join(rec).exists() && !r.join(ses).exists());
+        for n in others {
+            assert!(r.join(n).exists(), "{n}");
+        }
+        // already gone / nonexistent: no panic, nothing freed
+        assert_eq!(delete_checked(&all), 0);
     }
 
     #[test]
