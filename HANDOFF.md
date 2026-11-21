@@ -93,6 +93,11 @@ Terra changed after this handoff was written. Terra was wiped on 2026-11-17, and
    - PKGBUILD: add `libayatana-appindicator`, and add `gpu-screen-recorder` as an optdepend.
    - Add a `pnpm audit --audit-level high` gate.
    - Add focus traps to dialogs.
+7. **Terra goes Windows-only (2026-11-21, taken in away mode).** CachyOS is being retired. Reelspace had nothing on it.
+   - I asked the Coordinator to queue win jobs 0d (Omega installs the toolchain through winget) and 0e (`test-release-media.ps1` plus the ffmpeg Job Object kill check, at 5f2d04a).
+   - For Omega there is a bundle at `/home/agent/bundles/reelspace-5f2d04a.bundle`. To undo: cancel 0d and 0e with the Coordinator and delete the bundle.
+   - Open for you: Linux live-desktop testing has no host after the wipe. Recommended: accept CI-only Linux coverage and say so in the release notes.
+   - No subagents until you approve the rule 10/11 replacement (`/srv/terra-state/rules-10-11-proposal.md`).
 
 ## Gotchas
 
