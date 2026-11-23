@@ -156,6 +156,24 @@ impl Config {
         if !(1..=360).contains(&self.fps) {
             return e("fps must be between 1 and 360");
         }
+        // The prune target is budget minus one chunk; a budget <= one chunk would delete every recording.
+        let chunk = chunk_bytes(self.bitrate_kbps, self.chunk_sec);
+        // cap_gb is ignored while max_storage_gb is set, so a stale small cap_gb must not block startup.
+        for (name, gb) in [
+            (
+                "cap_gb",
+                self.max_storage_gb.is_none().then_some(self.cap_gb),
+            ),
+            ("max_storage_gb", self.max_storage_gb),
+        ] {
+            if gb.is_some_and(|gb| gb.saturating_mul(GB) <= chunk) {
+                return Err(format!(
+                    "{name} ({}) must be larger than one recording chunk ({:.1} GB at the current bitrate_kbps and chunk_sec)",
+                    gb.unwrap_or(0),
+                    chunk as f64 / GB as f64
+                ));
+            }
+        }
         if self.capture.trim().is_empty() {
             return e("capture must not be empty");
         }
@@ -297,6 +315,51 @@ mod tests {
         };
         assert!(c.validate().is_err());
         assert!(serde_json::from_str::<Config>(r#"{"mode":"bogus"}"#).is_err());
+    }
+
+    #[test]
+    fn budget_must_exceed_one_chunk() {
+        // defaults: 20000 kbps * 1800 s = 4.5 GB per chunk
+        let with = |gb| Config {
+            max_storage_gb: Some(gb),
+            ..Config::default()
+        };
+        assert!(with(4).validate().unwrap_err().contains("max_storage_gb"));
+        assert!(with(5).validate().is_ok());
+        // exactly one chunk (8000 * 125 * 4000 = 4 GB) is still too small
+        let c = Config {
+            max_storage_gb: Some(4),
+            bitrate_kbps: 8000,
+            chunk_sec: 4000,
+            ..Config::default()
+        };
+        assert!(c.validate().is_err());
+        let c = Config {
+            chunk_sec: 3999,
+            ..c
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn cap_must_exceed_one_chunk() {
+        // defaults: 4.5 GB per chunk
+        let with = |gb| Config {
+            cap_gb: gb,
+            ..Config::default()
+        };
+        assert!(with(4).validate().unwrap_err().contains("cap_gb"));
+        assert!(with(5).validate().is_ok());
+    }
+
+    #[test]
+    fn stale_small_cap_is_ignored_in_budget_mode() {
+        let c = Config {
+            cap_gb: 4,
+            max_storage_gb: Some(50),
+            ..Config::default()
+        };
+        assert!(c.validate().is_ok());
     }
 
     #[test]

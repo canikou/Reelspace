@@ -20,7 +20,8 @@ fn runtime_dir() -> std::path::PathBuf {
 
 fn daemon() -> i32 {
     let path = config_path();
-    // Invalid config at startup: run on defaults but surface the error rather than crash-loop.
+    // Invalid config at startup: load defaults but stay paused (no recording) and surface the error
+    // rather than crash-loop; a successful ReloadConfig lifts the hold.
     let (cfg, cfg_err) = match Config::load(&path) {
         Ok(c) => (c, None),
         Err(e) => (Config::default(), Some(e)),
@@ -44,8 +45,12 @@ fn daemon() -> i32 {
         c.shutdown.store(true, SeqCst);
     });
     if let Some(e) = cfg_err {
-        eprintln!("reelspace-recorder: config rejected, using defaults: {e}");
+        eprintln!(
+            "reelspace-recorder: config rejected, paused until it is fixed and reloaded: {e}"
+        );
         ctl.status.lock().unwrap().last_error = format!("config rejected: {e}");
+        ctl.config_hold.store(true, SeqCst);
+        ctl.paused.store(true, SeqCst);
     }
     Supervisor::new(ctl, Env::system()).run();
     0

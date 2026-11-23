@@ -22,8 +22,7 @@ import type {
   RecorderServiceState,
   RecorderStatus,
   RepairSummary,
-  UploadJob,
-  StorageStats
+  UploadJob
 } from "./types";
 
 const ERROR_CODES = new Set<AppErrorCode>([
@@ -117,8 +116,6 @@ export const api = {
     invokeCommand<LibraryDataImportSummary>("import_library_data", { path }),
   createClip: (request: CreateClipRequest) => invokeCommand<MediaItem>("create_clip", { request }),
   revealInExplorer: (id: string) => invokeCommand<void>("reveal_in_explorer", { id }),
-  getStorageStats: () => invokeCommand<StorageStats>("get_storage_stats"),
-  getCleanupCandidates: () => invokeCommand<MediaItem[]>("get_cleanup_candidates"),
   deleteRawFile: (id: string) => invokeCommand<MediaItem[]>("delete_raw_file", { id }),
   listGames: () => invokeCommand<Game[]>("list_games"),
   createGame: (name: string) => invokeCommand<Game[]>("create_game", { name }),

@@ -394,7 +394,13 @@ impl Database {
             ),
             _ => return Err(user_error("unknown upload queue action")),
         };
-        let sql = format!("UPDATE upload_jobs SET state = '{state}', error = NULL, next_attempt_at = 0, updated_at = {now} WHERE {where_clause}");
+        // A user resume/retry starts a fresh attempt budget; otherwise a failed job fails again on its first error.
+        let reset = if state == "queued" {
+            "attempts = 0, "
+        } else {
+            ""
+        };
+        let sql = format!("UPDATE upload_jobs SET state = '{state}', {reset}error = NULL, next_attempt_at = 0, updated_at = {now} WHERE {where_clause}");
         if action.ends_with("All") {
             conn.execute(&sql, [])?;
         } else {
@@ -804,7 +810,7 @@ pub fn export_diagnostics(state: State<'_, AppState>, path: String) -> AppResult
         "schemaVersion": 1,
         "generatedAt": Utc::now().to_rfc3339(),
         "reelspaceVersion": env!("CARGO_PKG_VERSION"),
-        "platform": "windows-x64",
+        "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "sourceFolderCount": settings.source_folders.len(),
         "mediaItems": media.len(),
         "queuedArchiveJobs": jobs.iter().filter(|job| job.state != "archived").count(),

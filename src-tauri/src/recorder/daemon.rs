@@ -212,14 +212,34 @@ impl Supervisor {
                 let restart = old.capture_params() != new.capture_params()
                     || old.replay_storage != new.replay_storage
                     || old.gsr_path != new.gsr_path;
+                // Shut down before set_cfg: shutdown_gsr finalizes the in-progress Video_ in the OLD rec_dir.
+                if restart && self.child.is_some() {
+                    self.shutdown_gsr(Duration::from_secs(35));
+                }
                 self.ctl.set_cfg(new);
                 // retry now: a fixed config must not wait out the old backoff
                 self.next_attempt = Instant::now();
                 self.backoff = Duration::from_secs(10);
-                if restart && self.child.is_some() {
-                    self.shutdown_gsr(Duration::from_secs(35));
-                }
                 self.last_house = Instant::now() - Duration::from_secs(3600);
+                // a good config lifts the startup hold and clears an earlier rejection;
+                // a Pause the user sent during the hold stays in effect
+                if self.ctl.config_hold.swap(false, SeqCst) {
+                    self.ctl
+                        .paused
+                        .store(self.ctl.user_paused.load(SeqCst), SeqCst);
+                }
+                let rejected = {
+                    let mut s = self.ctl.status.lock().unwrap();
+                    let r = s.last_error.starts_with("config rejected");
+                    if r {
+                        s.last_error.clear();
+                    }
+                    r
+                };
+                if rejected && self.child.is_some() {
+                    let cfg = self.cfg();
+                    self.ctl.set_state(self.run_state(&cfg), "");
+                }
                 self.ctl.sink.emit(Event::ConfigChanged);
             }
             Err(e) => {

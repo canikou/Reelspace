@@ -306,6 +306,8 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_upload_jobs_ready ON upload_jobs(state, next_attempt_at, priority DESC, created_at);
 
+            CREATE INDEX IF NOT EXISTS idx_upload_jobs_media ON upload_jobs(media_id, updated_at);
+
             CREATE TABLE IF NOT EXISTS media_events (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
@@ -643,6 +645,26 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn media_size_totals(&self) -> AppResult<(u64, u64)> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT kind, SUM(file_size) FROM media GROUP BY kind")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?.max(0) as u64,
+            ))
+        })?;
+        let (mut raw, mut clip) = (0u64, 0u64);
+        for row in rows {
+            let (kind, bytes) = row?;
+            match MediaKind::from_db(&kind) {
+                MediaKind::Raw => raw += bytes,
+                MediaKind::Clip => clip += bytes,
+            }
+        }
+        Ok((raw, clip))
+    }
+
     pub fn get_media(&self, id: &str) -> AppResult<MediaItem> {
         let conn = self.conn()?;
         conn.query_row("SELECT * FROM media WHERE id = ?1", [id], row_to_media)
@@ -949,7 +971,8 @@ fn upsert_media_on(conn: &Connection, item: &MediaItem) -> AppResult<()> {
           width, height, codec, tags_json, notes, thumbnail_path, created_at,
           modified_at, trim_start_seconds, trim_end_seconds
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-        ON CONFLICT(path) DO UPDATE SET
+        ON CONFLICT(id) DO UPDATE SET
+          path = excluded.path,
           kind = CASE
             WHEN media.kind = 'clip' AND excluded.kind = 'raw' THEN media.kind
             ELSE excluded.kind
@@ -1084,8 +1107,10 @@ mod tests {
         let db = Database::open(path.clone()).expect("database");
         db.upsert_media(&item("C:\\clips\\protected.mp4", MediaKind::Clip))
             .expect("insert clip");
-        db.upsert_media(&item("C:\\clips\\protected.mp4", MediaKind::Raw))
-            .expect("scanner upsert");
+        // Production ids come from the path alone, so the scanner reuses the clip's id.
+        let mut scanned = item("C:\\clips\\protected.mp4", MediaKind::Raw);
+        scanned.id = "Clip-C:\\clips\\protected.mp4".to_string();
+        db.upsert_media(&scanned).expect("scanner upsert");
 
         let stored = db
             .list_media(Some(MediaKind::Clip))
@@ -1127,6 +1152,34 @@ mod tests {
     }
 
     #[test]
+    fn case_variant_paths_with_the_same_id_update_one_row() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("reelspace-case-{nonce}.sqlite"));
+        let db = Database::open(path.clone()).expect("database");
+        let mut original = item(r"C:\Cap\Game\Clip.mp4", MediaKind::Raw);
+        original.id = "same-id".to_string();
+        db.upsert_media(&original).expect("insert");
+        db.update_tags(&original.id, &["kept".to_string()])
+            .expect("tags");
+        db.update_notes(&original.id, Some("kept note"))
+            .expect("note");
+        let mut renamed = original.clone();
+        renamed.path = r"c:\cap\game\clip.mp4".to_string();
+        db.upsert_media(&renamed).expect("case-variant upsert");
+
+        let all = db.list_media(None).expect("list");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].path, r"c:\cap\game\clip.mp4");
+        assert_eq!(all[0].tags, vec!["kept".to_string()]);
+        assert_eq!(all[0].notes.as_deref(), Some("kept note"));
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn batch_upserts_are_atomic_when_one_item_is_invalid() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1135,8 +1188,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!("reelspace-batch-{nonce}.sqlite"));
         let db = Database::open(path.clone()).expect("database");
         let first = item("C:\\captures\\first.mp4", MediaKind::Raw);
-        let mut conflicting = item("C:\\captures\\second.mp4", MediaKind::Raw);
-        conflicting.id = first.id.clone();
+        let mut conflicting = item("C:\\captures\\first.mp4", MediaKind::Raw);
+        conflicting.id = "different-id".to_string();
         assert!(db.upsert_media_batch(&[first, conflicting]).is_err());
         assert!(db.list_media(None).expect("rolled back").is_empty());
         drop(db);

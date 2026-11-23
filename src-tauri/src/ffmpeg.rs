@@ -41,7 +41,6 @@ impl AudioPreviewMethod {
 pub enum TrimMethod {
     Nvenc,
     Cpu,
-    StreamCopy,
 }
 
 impl TrimMethod {
@@ -49,7 +48,6 @@ impl TrimMethod {
         match self {
             Self::Nvenc => "nvenc",
             Self::Cpu => "libx264",
-            Self::StreamCopy => "stream_copy",
         }
     }
 }
@@ -317,7 +315,6 @@ impl Ffmpeg {
         output_path: &Path,
         start_seconds: f64,
         end_seconds: f64,
-        accurate: bool,
         audio_track_indices: &[u32],
     ) -> AppResult<TrimMethod> {
         let ffmpeg = self.ffmpeg_path.as_ref().ok_or_else(|| {
@@ -368,51 +365,38 @@ impl Ffmpeg {
             command.arg(output_path);
             run_with_timeout(command, timeout, "clip export")
         };
-        let (output, method) = if accurate {
-            let nvenc = run(&[
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p5",
-                "-cq",
-                "18",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-            ])?;
-            if nvenc.success {
-                (nvenc, TrimMethod::Nvenc)
-            } else {
-                (
-                    run(&[
-                        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt",
-                        "yuv420p", "-c:a", "aac", "-b:a", "192k",
-                    ])?,
-                    TrimMethod::Cpu,
-                )
-            }
+        let nvenc = run(&[
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p5",
+            "-cq",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+        ])?;
+        let (output, method) = if nvenc.success {
+            (nvenc, TrimMethod::Nvenc)
         } else {
             (
-                run(&["-c", "copy", "-avoid_negative_ts", "make_zero"])?,
-                TrimMethod::StreamCopy,
+                run(&[
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                ])?,
+                TrimMethod::Cpu,
             )
         };
         if output.success {
             Ok(method)
-        } else if accurate {
+        } else {
             Err(
                 app_error(ErrorCode::ExportFailed, "FFmpeg could not export the clip")
                     .with_detail(String::from_utf8_lossy(&output.stderr)),
             )
-        } else {
-            Err(app_error(
-                ErrorCode::ExportFailed,
-                "FFmpeg could not export the lossless clip",
-            )
-            .with_detail(String::from_utf8_lossy(&output.stderr)))
         }
     }
 }
@@ -444,11 +428,82 @@ fn thumbnail_command(ffmpeg: &Path, source: &Path, output_path: &Path, timestamp
 }
 
 fn media_command(executable: &Path) -> Command {
-    #[cfg_attr(not(windows), allow(unused_mut))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(unused_mut))]
     let mut command = Command::new(executable);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: prctl and getppid are async-signal-safe; nothing else runs between fork and exec.
+        // PDEATHSIG fires when the spawning *thread* exits. That is safe here because every caller
+        // waits for the child on the thread that spawned it.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // the app died before prctl took effect: don't run as an orphan
+                if libc::getppid() == 1 {
+                    return Err(std::io::Error::other("parent exited"));
+                }
+                Ok(())
+            });
+        }
+    }
     command
+}
+
+/// Ties a spawned media process to the app's lifetime so it can't outlive it (finding 17).
+/// On Linux the PDEATHSIG set in `media_command` does this. On Windows the child joins a
+/// process-wide kill-on-close Job Object: when the app exits or crashes, the last job handle
+/// closes and Windows kills the job's processes. Best effort: a failure only loses the cleanup.
+fn tie_to_app_lifetime(child: &std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        if let Some(job) = kill_on_close_job() {
+            // SAFETY: `job` is a live job handle owned for the process lifetime; the child handle is valid while `child` is borrowed.
+            unsafe {
+                AssignProcessToJobObject(job as _, child.as_raw_handle() as _);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = child;
+}
+
+#[cfg(windows)]
+fn kill_on_close_job() -> Option<isize> {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    static JOB: OnceLock<Option<isize>> = OnceLock::new();
+    *JOB.get_or_init(|| {
+        // SAFETY: plain Win32 calls; the handle is never closed, so it lives until the process exits.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+                return None;
+            }
+            Some(job as isize)
+        }
+    })
 }
 
 struct ProcessResult {
@@ -478,6 +533,7 @@ fn run_with_timeout_cancellable(
 ) -> AppResult<CapturedProcessResult> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    tie_to_app_lifetime(&child);
     let stdout_reader = child
         .stdout
         .take()
@@ -532,6 +588,7 @@ fn run_with_timeout_cancellable(
 fn run_cancellable(mut command: Command, cancelled: &AtomicBool) -> AppResult<ProcessResult> {
     command.stdout(Stdio::null()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    tie_to_app_lifetime(&child);
     let stderr_reader = child
         .stderr
         .take()

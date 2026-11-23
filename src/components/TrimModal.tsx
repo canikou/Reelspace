@@ -1,5 +1,5 @@
 import { type MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { api, mediaSrc } from "../lib/api";
+import { api, mediaSrc, normalizeAppError } from "../lib/api";
 import { formatDuration } from "../lib/format";
 import type { AudioTrack, MediaItem } from "../lib/types";
 import { AppIcon } from "./icons";
@@ -123,8 +123,8 @@ export function TrimModal({
               });
             }
           } catch (reason) {
-            if (active && generationRef.current === generation && !String(reason).toLowerCase().includes("cancelled")) {
-              setPreviewErrors((current) => ({ ...current, [track.index]: String(reason) }));
+            if (active && generationRef.current === generation && normalizeAppError(reason).code !== "mediaProcessCancelled") {
+              setPreviewErrors((current) => ({ ...current, [track.index]: normalizeAppError(reason).message }));
               setPreviewStatus((current) => ({ ...current, [track.index]: { phase: "error" } }));
               logTrimEvent("audio.preview.error", {
                 streamIndex: track.index,
@@ -144,7 +144,7 @@ export function TrimModal({
       })
       .catch((reason) => {
         if (!active || generationRef.current !== generation) return;
-        setTrackError(String(reason));
+        setTrackError(normalizeAppError(reason).message);
         setTracksLoading(false);
         logTrimEvent("audio.probe.error", {
           elapsedMs: Math.round(performance.now() - probeStarted),
@@ -296,7 +296,7 @@ export function TrimModal({
       });
       await onCreated(created);
     } catch (reason) {
-      if (mountedRef.current) setError(String(reason));
+      if (mountedRef.current) setError(normalizeAppError(reason).message);
       logTrimEvent("trim.save.error", {
         elapsedMs: Math.round(performance.now() - saveStarted),
         error: String(reason)

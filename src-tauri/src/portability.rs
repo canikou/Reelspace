@@ -295,6 +295,7 @@ pub fn import_library_data(
         .enumerate()
         .map(|(index, item)| (normalized_path_key(Path::new(&item.path)), index))
         .collect::<HashMap<_, _>>();
+    let by_filename = index_by_filename(&current);
     let mut matched_items = 0u64;
     let mut restored_items = Vec::new();
     let mut updates = Vec::new();
@@ -304,7 +305,7 @@ pub fn import_library_data(
     let mut claimed_local_ids = HashSet::new();
 
     for archived in &archive.items {
-        if let Some(index) = match_existing(archived, &current, &by_path, &roots) {
+        if let Some(index) = match_existing(archived, &current, &by_path, &by_filename, &roots) {
             let local = &current[index];
             if !claimed_local_ids.insert(local.id.clone()) {
                 continue;
@@ -622,7 +623,22 @@ fn validate_archive(archive: &LibraryArchive) -> AppResult<()> {
     Ok(())
 }
 
+/// One plain path component: these values are joined under the data dir.
+fn is_single_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && !value.contains('/')
+        // A backslash is a legal filename character outside Windows.
+        && !(cfg!(windows) && value.contains('\\'))
+}
+
 fn validate_item(item: &ArchiveItem) -> AppResult<()> {
+    if !is_single_component(&item.archive_id) || !is_single_component(&item.filename) {
+        return Err(user_error(
+            "an imported media identifier or filename is invalid",
+        ));
+    }
     validate_path_text(&item.original_path, "media path")?;
     if let Some(path) = &item.relative_path {
         validate_relative_path(path)?;
@@ -727,6 +743,7 @@ fn match_existing(
     archived: &ArchiveItem,
     current: &[MediaItem],
     by_path: &HashMap<String, usize>,
+    by_filename: &HashMap<String, Vec<usize>>,
     roots: &[PathBuf],
 ) -> Option<usize> {
     let original_key = normalized_path_key(Path::new(&archived.original_path));
@@ -746,16 +763,25 @@ fn match_existing(
             return candidates.into_iter().next();
         }
     }
-    let candidates = current
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            item.filename.eq_ignore_ascii_case(&archived.filename)
-                && signature_matches(archived, item)
-        })
-        .map(|(index, _)| index)
+    let candidates = by_filename
+        .get(&archived.filename.to_ascii_lowercase())
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|index| signature_matches(archived, &current[*index]))
         .collect::<Vec<_>>();
     (candidates.len() == 1).then(|| candidates[0])
+}
+
+fn index_by_filename(current: &[MediaItem]) -> HashMap<String, Vec<usize>> {
+    let mut by_filename = HashMap::<String, Vec<usize>>::new();
+    for (index, item) in current.iter().enumerate() {
+        by_filename
+            .entry(item.filename.to_ascii_lowercase())
+            .or_default()
+            .push(index);
+    }
+    by_filename
 }
 
 fn signature_matches(archived: &ArchiveItem, current: &MediaItem) -> bool {
@@ -1516,7 +1542,30 @@ mod tests {
             .enumerate()
             .map(|(index, item)| (normalized_path_key(Path::new(&item.path)), index))
             .collect();
-        assert!(match_existing(&archived, &current, &by_path, &[]).is_none());
+        let by_filename = index_by_filename(&current);
+        assert!(match_existing(&archived, &current, &by_path, &by_filename, &[]).is_none());
+    }
+
+    #[test]
+    fn item_filename_and_id_must_be_single_path_components() {
+        assert!(validate_item(&archive_item()).is_ok());
+        let mut bad_values = vec!["", ".", "..", "a/b", "/abs"];
+        if cfg!(windows) {
+            bad_values.extend(["..\\..\\x", "C:\\x", "\\\\srv\\share"]);
+        } else {
+            // A backslash is an ordinary filename character on Linux.
+            let mut backslash = archive_item();
+            backslash.filename = "a\\b.mp4".into();
+            assert!(validate_item(&backslash).is_ok());
+        }
+        for bad in bad_values {
+            let mut bad_filename = archive_item();
+            bad_filename.filename = bad.into();
+            assert!(validate_item(&bad_filename).is_err(), "filename {bad:?}");
+            let mut bad_id = archive_item();
+            bad_id.archive_id = bad.into();
+            assert!(validate_item(&bad_id).is_err(), "archive_id {bad:?}");
+        }
     }
 
     #[test]

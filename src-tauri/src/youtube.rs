@@ -26,6 +26,7 @@ const YOUTUBE_SCOPE: &str = "https://www.googleapis.com/auth/youtube.upload http
 const DEFAULT_CLIENT_ID: &str =
     "213662861772-slkhvmapt8hpv7r6f1ll3tv4gvcnfcd5.apps.googleusercontent.com";
 const BUNDLED_CLIENT_ID: Option<&str> = option_env!("REELSPACE_YOUTUBE_CLIENT_ID");
+const MAX_UPLOAD_ATTEMPTS: u32 = 8;
 const UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +119,7 @@ impl Database {
         let work = tx.query_row(
             "SELECT uj.id, uj.media_id, m.path, m.filename, uj.total_bytes, uj.bytes_uploaded, uj.session_url, uj.provider_remote_id, uj.attempts
              FROM upload_jobs uj INNER JOIN media m ON m.id = uj.media_id
-             WHERE uj.state IN ('queued', 'retry', 'processing_remote') AND uj.next_attempt_at <= ?1
+             WHERE uj.state IN ('queued', 'retry', 'processing_remote', 'waiting_for_quota') AND uj.next_attempt_at <= ?1
              ORDER BY uj.priority DESC, uj.created_at LIMIT 1",
             [now],
             |row| Ok(ArchiveWork {
@@ -145,14 +146,14 @@ impl Database {
     }
 
     pub(crate) fn set_upload_progress(&self, job_id: &str, bytes: u64) -> AppResult<()> {
-        self.conn()?.execute("UPDATE upload_jobs SET bytes_uploaded = ?1, state = 'uploading', updated_at = ?2 WHERE id = ?3", params![bytes as i64, Utc::now().timestamp(), job_id])?;
+        self.conn()?.execute("UPDATE upload_jobs SET attempts = CASE WHEN ?1 > bytes_uploaded THEN 0 ELSE attempts END, bytes_uploaded = ?1, state = 'uploading', updated_at = ?2 WHERE id = ?3", params![bytes as i64, Utc::now().timestamp(), job_id])?;
         Ok(())
     }
 
     pub(crate) fn set_remote_processing(&self, job_id: &str, remote_id: &str) -> AppResult<()> {
         let now = Utc::now().timestamp();
         self.conn()?.execute(
-            "UPDATE upload_jobs SET provider_remote_id = ?1, bytes_uploaded = total_bytes, state = 'processing_remote', next_attempt_at = ?2, error = NULL, updated_at = ?3 WHERE id = ?4",
+            "UPDATE upload_jobs SET provider_remote_id = ?1, bytes_uploaded = total_bytes, state = 'processing_remote', attempts = 0, next_attempt_at = ?2, error = NULL, updated_at = ?3 WHERE id = ?4",
             params![remote_id, now + 30, now, job_id],
         )?;
         Ok(())
@@ -185,9 +186,13 @@ impl Database {
         delay_seconds: i64,
     ) -> AppResult<()> {
         let now = Utc::now().timestamp();
+        // The attempt cap is checked here against the live DB value (set_upload_progress may have reset it
+        // since the claim). A successful verify poll ('processing_remote') is not a failed attempt.
         self.conn()?.execute(
-            "UPDATE upload_jobs SET state = ?1, error = ?2, next_attempt_at = ?3, updated_at = ?4 WHERE id = ?5",
-            params![state, message, now + delay_seconds, now, work.id],
+            "UPDATE upload_jobs SET state = CASE WHEN ?1 = 'retry' AND attempts >= ?6 THEN 'failed' ELSE ?1 END,
+             attempts = CASE WHEN ?1 = 'processing_remote' THEN 0 ELSE attempts END,
+             error = ?2, next_attempt_at = ?3, updated_at = ?4 WHERE id = ?5",
+            params![state, message, now + delay_seconds, now, work.id, MAX_UPLOAD_ATTEMPTS],
         )?;
         Ok(())
     }
@@ -270,6 +275,8 @@ pub(crate) fn start_youtube_worker(state: AppState) {
                             "needs_sign_in"
                         } else if error.message.contains("allowance") {
                             "waiting_for_quota"
+                        } else if is_permanent_upload_error(&error) {
+                            "failed"
                         } else {
                             "retry"
                         };
@@ -404,7 +411,11 @@ fn process_archive_work(state: &AppState, work: &ArchiveWork) -> AppResult<()> {
     }
     let metadata = std::fs::metadata(&work.path).map_err(|error| {
         app_error(
-            ErrorCode::SourceUnavailable,
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ErrorCode::FileNotFound
+            } else {
+                ErrorCode::SourceUnavailable
+            },
             "The queued local file is unavailable",
         )
         .with_detail(error.to_string())
@@ -461,7 +472,7 @@ fn process_archive_work(state: &AppState, work: &ArchiveWork) -> AppResult<()> {
                 .get(RANGE)
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_uploaded_range)
-                .unwrap_or(last + 1);
+                .unwrap_or(0);
             state.db.set_upload_progress(&work.id, offset)?;
             continue;
         }
@@ -482,10 +493,7 @@ fn process_archive_work(state: &AppState, work: &ArchiveWork) -> AppResult<()> {
 }
 
 fn begin_upload(client: &Client, access_token: &str, work: &ArchiveWork) -> AppResult<String> {
-    let title = Path::new(&work.filename)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Reelspace recording");
+    let title = youtube_title(&work.filename);
     let response = client.post("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status")
         .bearer_auth(access_token).header(CONTENT_TYPE, "application/json; charset=UTF-8")
         .header("X-Upload-Content-Length", work.total_bytes).header("X-Upload-Content-Type", "application/octet-stream")
@@ -650,21 +658,37 @@ fn receive_oauth_callback(listener: TcpListener) -> AppResult<(String, String)> 
     listener.set_nonblocking(true)?;
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
+        if Instant::now() >= deadline {
+            return Err(user_error("Google authorization timed out"));
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // Accepted sockets inherit non-blocking mode on some platforms; bound each read instead.
+                stream.set_nonblocking(false)?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                 let mut buffer = [0_u8; 8192];
-                let read = stream.read(&mut buffer)?;
+                let Ok(read) = stream.read(&mut buffer) else {
+                    continue;
+                };
                 let request = String::from_utf8_lossy(&buffer[..read]);
-                let target = request
+                let Some(url) = request
                     .lines()
                     .next()
                     .and_then(|line| line.split_whitespace().nth(1))
-                    .ok_or_else(|| user_error("the OAuth callback was malformed"))?;
-                let url = Url::parse(&format!("http://127.0.0.1{target}"))
-                    .map_err(|_| user_error("the OAuth callback URL was malformed"))?;
+                    .and_then(|target| Url::parse(&format!("http://127.0.0.1{target}")).ok())
+                else {
+                    continue;
+                };
                 let values = url
                     .query_pairs()
                     .collect::<std::collections::HashMap<_, _>>();
+                if !values.contains_key("code") && !values.contains_key("error") {
+                    // e.g. /favicon.ico: answer and keep waiting for the real redirect.
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
                 let html = "<!doctype html><meta charset=utf-8><title>Reelspace connected</title><body style='font:16px system-ui;background:#0c0b12;color:#f4f1fa;padding:40px'><h1>Return to Reelspace</h1><p>You can close this tab.</p></body>";
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}", html.len());
                 let _ = stream.write_all(response.as_bytes());
@@ -683,13 +707,8 @@ fn receive_oauth_callback(listener: TcpListener) -> AppResult<(String, String)> 
                     .ok_or_else(|| user_error("Google did not return the OAuth session state"))?;
                 return Ok((code, state));
             }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(100))
-            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Err(user_error("Google authorization timed out"))
+                std::thread::sleep(Duration::from_millis(100))
             }
             Err(error) => return Err(error.into()),
         }
@@ -859,6 +878,33 @@ fn parse_uploaded_range(value: &str) -> Option<u64> {
         .ok()?
         .checked_add(1)
 }
+/// YouTube rejects titles over 100 characters or containing angle brackets.
+fn youtube_title(filename: &str) -> String {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let title = stem
+        .chars()
+        .filter(|ch| !matches!(ch, '<' | '>'))
+        .take(100)
+        .collect::<String>();
+    let title = title.trim();
+    if title.is_empty() {
+        "Reelspace recording".to_owned()
+    } else {
+        title.to_owned()
+    }
+}
+
+/// Errors a retry cannot fix: the file changed or vanished, or YouTube answered HTTP 400.
+fn is_permanent_upload_error(error: &crate::error::AppError) -> bool {
+    matches!(error.code, ErrorCode::FileChanged | ErrorCode::FileNotFound)
+        || error
+            .detail()
+            .is_some_and(|detail| detail.starts_with("HTTP 400:"))
+}
+
 fn retry_delay(attempts: u32) -> i64 {
     (30_i64.saturating_mul(2_i64.saturating_pow(attempts.min(10)))).min(6 * 60 * 60)
 }
@@ -870,6 +916,140 @@ mod tests {
     fn resumable_ranges_continue_after_the_last_confirmed_byte() {
         assert_eq!(parse_uploaded_range("bytes=0-8388607"), Some(8_388_608));
     }
+    #[test]
+    fn upload_progress_resets_attempts_only_when_the_offset_advances() {
+        let path = std::env::temp_dir().join(format!(
+            "reelspace-yt-progress-{}.sqlite",
+            std::process::id()
+        ));
+        let db = Database::open(path.clone()).expect("database");
+        {
+            let conn = db.conn().expect("conn");
+            conn.execute(
+                "INSERT INTO media (id, kind, path, filename, file_size, duration_seconds, tags_json, created_at, modified_at) VALUES ('m', 'raw', 'p', 'f.mp4', 1, 1.0, '[]', 1, 1)",
+                [],
+            )
+            .expect("media");
+            conn.execute(
+                "INSERT INTO upload_jobs (id, media_id, provider, state, attempts, created_at, updated_at) VALUES ('j', 'm', 'youtube', 'uploading', 5, 1, 1)",
+                [],
+            )
+            .expect("job");
+        }
+        let attempts = |db: &Database| -> i64 {
+            db.conn()
+                .expect("conn")
+                .query_row(
+                    "SELECT attempts FROM upload_jobs WHERE id = 'j'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("attempts")
+        };
+        db.set_upload_progress("j", 100).expect("advance");
+        assert_eq!(attempts(&db), 0);
+        db.conn()
+            .expect("conn")
+            .execute("UPDATE upload_jobs SET attempts = 3", [])
+            .expect("bump");
+        db.set_upload_progress("j", 100).expect("no progress");
+        assert_eq!(attempts(&db), 3);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn attempt_cap_uses_live_attempts_and_verify_polls_do_not_count() {
+        let path =
+            std::env::temp_dir().join(format!("reelspace-yt-cap-{}.sqlite", std::process::id()));
+        let db = Database::open(path.clone()).expect("database");
+        {
+            let conn = db.conn().expect("conn");
+            conn.execute(
+                "INSERT INTO media (id, kind, path, filename, file_size, duration_seconds, tags_json, created_at, modified_at) VALUES ('m', 'raw', 'p', 'f.mp4', 1, 1.0, '[]', 1, 1)",
+                [],
+            )
+            .expect("media");
+            conn.execute(
+                "INSERT INTO upload_jobs (id, media_id, provider, state, attempts, created_at, updated_at) VALUES ('j', 'm', 'youtube', 'queued', 7, 1, 1)",
+                [],
+            )
+            .expect("job");
+        }
+        let row = |db: &Database| -> (String, i64) {
+            db.conn()
+                .expect("conn")
+                .query_row(
+                    "SELECT state, attempts FROM upload_jobs WHERE id = 'j'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("row")
+        };
+        let requeue = |db: &Database, attempts: i64| {
+            db.conn()
+                .expect("conn")
+                .execute(
+                    "UPDATE upload_jobs SET state = 'queued', attempts = ?1, next_attempt_at = 0",
+                    [attempts],
+                )
+                .expect("requeue");
+        };
+
+        // Progress after the claim resets attempts, so the error is a plain retry.
+        let work = db.claim_archive_work().expect("claim").expect("work");
+        assert_eq!(row(&db).1, 8);
+        db.set_upload_progress("j", 100).expect("progress");
+        db.reschedule_archive(&work, "retry", "boom", 0)
+            .expect("reschedule");
+        assert_eq!(row(&db), ("retry".to_string(), 0));
+
+        // No progress: the cap is reached and the job fails.
+        requeue(&db, 7);
+        let work = db.claim_archive_work().expect("claim").expect("work");
+        db.reschedule_archive(&work, "retry", "boom", 0)
+            .expect("reschedule");
+        assert_eq!(row(&db), ("failed".to_string(), 8));
+
+        // Remote processing and each successful verify poll reset attempts.
+        requeue(&db, 7);
+        db.set_remote_processing("j", "vid").expect("processing");
+        assert_eq!(row(&db), ("processing_remote".to_string(), 0));
+        db.conn()
+            .expect("conn")
+            .execute(
+                "UPDATE upload_jobs SET attempts = 5, next_attempt_at = 0",
+                [],
+            )
+            .expect("bump");
+        let work = db.claim_archive_work().expect("claim").expect("work");
+        db.reschedule_archive(&work, "processing_remote", "still processing", 0)
+            .expect("reschedule");
+        assert_eq!(row(&db), ("processing_remote".to_string(), 0));
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn upload_titles_fit_youtube_limits() {
+        assert_eq!(youtube_title("a<b>c.mp4"), "abc");
+        assert_eq!(
+            youtube_title(&format!("{}.mp4", "x".repeat(300))).len(),
+            100
+        );
+        assert_eq!(youtube_title("<>.mp4"), "Reelspace recording");
+    }
+
+    #[test]
+    fn permanent_upload_errors_are_not_retried() {
+        let changed = app_error(ErrorCode::FileChanged, "changed");
+        let bad_request = app_error(ErrorCode::SourceUnavailable, "x").with_detail("HTTP 400: {}");
+        let server = app_error(ErrorCode::SourceUnavailable, "x").with_detail("HTTP 503: {}");
+        assert!(is_permanent_upload_error(&changed));
+        assert!(is_permanent_upload_error(&bad_request));
+        assert!(!is_permanent_upload_error(&server));
+    }
+
     #[test]
     fn retry_backoff_is_bounded() {
         assert_eq!(retry_delay(0), 30);
