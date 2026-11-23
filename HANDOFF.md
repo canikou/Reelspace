@@ -98,6 +98,11 @@ Terra changed after this handoff was written. Terra was wiped on 2026-11-17, and
    - For Omega there is a bundle at `/srv/terra-state/drop/reelspace-5f2d04a.bundle` (copied there by the Coordinator). To undo: cancel 0d and 0e with the Coordinator and delete the bundle.
    - Approved by Kyo (2026-11-24): Linux coverage is CI-only (no live-desktop host after the wipe). Release notes must say the Linux build was not tested on a live desktop.
    - Rules 10/11 v3 (approved 2026-11-21): subagents run only on Terra Omega. Until Omega is linked, work queues with the Coordinator as `win`.
+8. **Kyo approved every recommendation (2026-11-24): decisions 1–6 as recommended.**
+   - Decision 1: merge PR #4 after win job 0e passes. The merge goes through the broker gate.
+   - Decision 4: the case-only filename issue on Linux stays open. Decision 5: the behaviour changes stay as they are.
+   - Decisions 2, 3 and 6 are queued as win job 0g ("reelspace-recs", branch feat/recs-1124 from this branch). The Coordinator has the full brief. Per Kyo it waits for the "PC is free" broadcast. Bundle: ~/rs-56cae5b.bundle.
+   - Kyo still has to add the youtube.force-ssl scope in the Google Cloud console for decision 3.
 
 ## Gotchas
 
