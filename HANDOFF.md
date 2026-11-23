@@ -101,7 +101,7 @@ Terra changed after this handoff was written. Terra was wiped on 2026-11-17, and
 8. **Kyo approved every recommendation (2026-11-24): decisions 1–6 as recommended.**
    - Decision 1: merge PR #4 after win job 0e passes. The merge goes through the broker gate.
    - Decision 4: the case-only filename issue on Linux stays open. Decision 5: the behaviour changes stay as they are.
-   - Decisions 2, 3 and 6 are queued as win job 0g ("reelspace-recs", branch feat/recs-1124 from this branch). The Coordinator has the full brief. Per Kyo it waits for the "PC is free" broadcast. Bundle: ~/rs-56cae5b.bundle.
+   - Decisions 2, 3 and 6 are queued as win job 0g ("reelspace-recs", branch feat/recs-1124 from this branch). The Coordinator has the full brief. Per Kyo it waits for the "PC is free" broadcast. Bundle: /srv/terra-state/drop/reelspace-56cae5b.bundle; results land in drop/in/reelspace-0g/.
    - Kyo still has to add the youtube.force-ssl scope in the Google Cloud console for decision 3.
 
 ## Gotchas
